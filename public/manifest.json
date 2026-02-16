@@ -1,0 +1,9 @@
+{
+  "name": "SplitPay",
+  "short_name": "SplitPay",
+  "description": "Divide la cuenta fácil",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#06080c",
+  "theme_color": "#22c55e"
+}
