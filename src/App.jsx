@@ -289,6 +289,7 @@ export default function SplitPay() {
     setNiName(""); setNiPrice(""); setNiQty("1"); setShowAdd(false);
   };
   const rmItem = id => { setOcrItems(prev => prev.filter(it => it.id !== id)); if (editId === id) setEditId(null); };
+  const toggleShared = id => { setOcrItems(prev => prev.map(it => it.id === id ? { ...it, shared: !it.shared } : it)); };
   const startEdit = it => { setEditId(it.id); setEf({ n: it.name, p: String(it.unitPrice), q: String(it.qty) }); };
   const saveEdit = id => {
     setOcrItems(prev => prev.map(it => it.id === id ? { ...it, name: ef.n || it.name, unitPrice: Number(ef.p) || it.unitPrice, qty: Number(ef.q) || it.qty } : it));
@@ -364,8 +365,12 @@ export default function SplitPay() {
     if (!sel.length) return;
     setSubmitting(true);
     const itemsClaim = {};
-    sel.forEach(([id, q]) => { itemsClaim[id] = q; });
-    await fbSubmit(roomCode, selPerson, { items: itemsClaim });
+    const sharedClaim = {};
+    sel.forEach(([id, q]) => {
+      if (id.startsWith("sh_")) sharedClaim[id.replace("sh_", "")] = 1;
+      else itemsClaim[id] = q;
+    });
+    await fbSubmit(roomCode, selPerson, { items: itemsClaim, shared: sharedClaim });
     const updated = await fbGet(roomCode);
     if (updated) setRoomData(updated);
     setMyQtys({});
@@ -387,7 +392,27 @@ export default function SplitPay() {
   const claimedQty = iid => { let t = 0; Object.values(claims).forEach(c => { t += ((c.items || {})[iid] || 0); }); return t; };
   const remainQty = iid => { const it = items.find(i => i.id === iid); return it ? it.qty - claimedQty(iid) : 0; };
 
-  const pSub = pid => { if (!claims[pid]) return 0; let s = 0; Object.entries(claims[pid].items || {}).forEach(([iid, q]) => { const it = items.find(i => i.id === iid); if (it) s += it.unitPrice * q; }); return s; };
+  // Count how many people claimed a shared item
+  const sharedClaimCount = iid => {
+    let n = 0;
+    Object.values(claims).forEach(c => { if (c.shared && c.shared[iid]) n++; });
+    return n;
+  };
+  // Person's shared items total
+  const pShared = pid => {
+    if (!claims[pid]?.shared) return 0;
+    return Object.keys(claims[pid].shared).reduce((s, iid) => {
+      const it = items.find(i => i.id === iid);
+      if (!it) return s;
+      const n = sharedClaimCount(iid) || 1;
+      return s + Math.round(it.unitPrice * it.qty / n);
+    }, 0);
+  };
+  const pSub = pid => { 
+    let s = pShared(pid);
+    if (claims[pid]) Object.entries(claims[pid].items || {}).forEach(([iid, q]) => { const it = items.find(i => i.id === iid); if (it) s += it.unitPrice * q; });
+    return s;
+  };
   const pTip = pid => Math.round(pSub(pid) * tp / 100);
   const pTot = pid => pSub(pid) + pTip(pid);
 
@@ -412,14 +437,23 @@ export default function SplitPay() {
     let m = `🧾 *Resumen — SplitPay*\n${loc}\nTotal: ${fmt(total)}\n\n`;
     ppl.forEach(p => {
       const cl = claims[p.id];
-      m += `${p.avatar} *${p.name}*: ${cl ? fmt(pTot(p.id)) : "⏳"}\n`;
+      m += `${p.avatar} *${p.name}*: ${fmt(pTot(p.id))}\n`;
+      // Shared items from claims
+      if (claims[p.id]?.shared) {
+        Object.keys(claims[p.id].shared).forEach(iid => {
+          const it = items.find(i => i.id === iid); if (!it) return;
+          const n = sharedClaimCount(iid) || 1;
+          m += `   • 👥 ${it.name} (÷${n}): ${fmt(Math.round(it.unitPrice * it.qty / n))}\n`;
+        });
+      }
+      // Individual items
       if (cl) {
         Object.entries(cl.items || {}).forEach(([iid, q]) => {
           const it = items.find(i => i.id === iid);
           if (it) m += `   • ${q > 1 ? q + "x " : ""}${it.name}: ${fmt(it.unitPrice * q)}\n`;
         });
-        m += `   • Propina: ${fmt(pTip(p.id))}\n\n`;
       }
+      m += `   • Propina: ${fmt(pTip(p.id))}\n\n`;
     });
     m += `💸 ¡Cada uno envía su parte!\n\n👉 Ver detalle: ${getRoomURL(roomCode)}`;
     return m;
@@ -429,7 +463,15 @@ export default function SplitPay() {
 
   const setIQ = (iid, q) => setMyQtys(prev => { const n = { ...prev }; if (q <= 0) delete n[iid]; else n[iid] = q; return n; });
 
-  const myItemsTotal = Object.entries(myQtys).reduce((s, [iid, q]) => { const it = items.find(i => i.id === iid); return s + (it ? it.unitPrice * q : 0); }, 0);
+  // Shared items: calculate this person's share based on how many people joined
+  const mySharedTotal = selPerson ? items.filter(it => it.shared && (myQtys["sh_" + it.id] || 0) === 1).reduce((s, it) => {
+    // Count others who already claimed this shared item + me
+    const othersCount = Object.entries(claims).filter(([pid, c]) => pid !== selPerson && c.shared && c.shared[it.id]).length;
+    const totalCount = othersCount + 1;
+    return s + Math.round(it.unitPrice * it.qty / totalCount);
+  }, 0) : 0;
+  const mySharedCount = Object.keys(myQtys).filter(k => k.startsWith("sh_") && myQtys[k] === 1).length;
+  const myItemsTotal = Object.entries(myQtys).reduce((s, [iid, q]) => { const it = items.find(i => i.id === iid); return s + (it ? it.unitPrice * q : 0); }, 0) + mySharedTotal;
   const myTip = Math.round(myItemsTotal * tp / 100);
   const myCount = Object.values(myQtys).reduce((s, q) => s + q, 0);
 
@@ -545,15 +587,19 @@ export default function SplitPay() {
                   </div>
                 </Card>
               ) : (
-                <Card style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                  {it.qty > 1 && <div style={{ background: T.accentSoft, color: T.accent, borderRadius: 8, padding: "2px 8px", fontSize: 13, fontWeight: 800, flexShrink: 0 }}>×{it.qty}</div>}
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 15, fontWeight: 600 }}>{it.name}</div>
-                    <div style={{ fontSize: 13, color: T.textSec }}>{fmt(it.unitPrice)} c/u</div>
+                <Card style={{ background: it.shared ? T.hotSoft : T.card, borderColor: it.shared ? T.hot : T.border }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                    {it.qty > 1 && <div style={{ background: T.accentSoft, color: T.accent, borderRadius: 8, padding: "2px 8px", fontSize: 13, fontWeight: 800, flexShrink: 0 }}>×{it.qty}</div>}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 15, fontWeight: 600 }}>{it.name}</div>
+                      <div style={{ fontSize: 13, color: T.textSec }}>{fmt(it.unitPrice)} c/u</div>
+                      {it.shared && <div style={{ fontSize: 11, fontWeight: 700, color: T.hot, marginTop: 2 }}>👥 Compartido — cada persona se asigna</div>}
+                    </div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: T.accent }}>{fmt(it.unitPrice * it.qty)}</div>
+                    <button onClick={() => toggleShared(it.id)} title={it.shared ? "Quitar compartido" : "Marcar como compartido"} style={{ background: it.shared ? T.hot : T.surface, border: `1px solid ${it.shared ? T.hot : T.border}`, borderRadius: 8, cursor: "pointer", fontSize: 13, padding: "4px 8px", color: it.shared ? "#fff" : T.textSec }}>👥</button>
+                    <button onClick={() => startEdit(it)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 6, color: T.textSec }}>✏️</button>
+                    <button onClick={() => rmItem(it.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 6, color: T.danger }}>🗑</button>
                   </div>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: T.accent }}>{fmt(it.unitPrice * it.qty)}</div>
-                  <button onClick={() => startEdit(it)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 6, color: T.textSec }}>✏️</button>
-                  <button onClick={() => rmItem(it.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, padding: 6, color: T.danger }}>🗑</button>
                 </Card>
               )}
             </div>
@@ -694,8 +740,36 @@ export default function SplitPay() {
         )}
 
         {selPerson && (<>
+          {/* Shared items — each person toggles if they participated */}
+          {items.filter(it => it.shared).length > 0 && (<>
+            <Lbl>👥 ÍTEMS COMPARTIDOS</Lbl>
+            <div style={{ fontSize: 12, color: T.textSec, marginTop: -8, marginBottom: 4 }}>Marca los que compartiste</div>
+            {items.filter(it => it.shared).map(it => {
+              const joined = (myQtys["sh_" + it.id] || 0) === 1;
+              const othersCount = Object.entries(claims).filter(([pid, c]) => pid !== selPerson && c.shared && c.shared[it.id]).length;
+              const totalIfJoin = othersCount + 1;
+              const shareIfJoin = Math.round(it.unitPrice * it.qty / totalIfJoin);
+              return (
+                <div key={"sh-" + it.id} onClick={() => setMyQtys(prev => ({ ...prev, ["sh_" + it.id]: joined ? 0 : 1 }))}
+                  style={{ background: joined ? T.hotSoft : T.card, borderRadius: 14, padding: "14px 18px", border: `1.5px solid ${joined ? T.hot : T.border}`, cursor: "pointer", display: "flex", alignItems: "center", gap: 14 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: 8, background: joined ? T.hot : T.surface, border: `2px solid ${joined ? T.hot : T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "#fff", flexShrink: 0 }}>{joined ? "✓" : ""}</div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 15, fontWeight: 600, color: joined ? T.text : T.textSec }}>{it.name}</div>
+                    <div style={{ fontSize: 12, color: T.textDim }}>
+                      {fmt(it.unitPrice * it.qty)} total
+                      {othersCount > 0 && ` · ${othersCount} ya se sumaron`}
+                      {joined && ` · te toca ${fmt(shareIfJoin)}`}
+                    </div>
+                  </div>
+                  {joined && <div style={{ fontSize: 14, fontWeight: 700, color: T.hot }}>{fmt(shareIfJoin)}</div>}
+                </div>
+              );
+            })}
+          </>)}
+
+          {/* Individual items — stepper selection */}
           <Lbl>¿QUÉ CONSUMISTE?</Lbl>
-          {items.map(it => {
+          {items.filter(it => !it.shared).map(it => {
             const myQ = myQtys[it.id] || 0;
             const rem = remainQty(it.id);
             const on = myQ > 0;
@@ -720,8 +794,11 @@ export default function SplitPay() {
           })}
 
           <Card glow style={{ position: "sticky", bottom: 80 }}>
+            {mySharedTotal > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.hot, marginBottom: 4 }}>
+              <span>👥 Compartidos</span><span>{fmt(mySharedTotal)}</span>
+            </div>}
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, marginBottom: 4 }}>
-              <span>{myCount} unidad{myCount !== 1 ? "es" : ""}</span><span>{fmt(myItemsTotal)}</span>
+              <span>{myCount} ítem{myCount !== 1 ? "s" : ""} individual{myCount !== 1 ? "es" : ""}</span><span>{fmt(myItemsTotal - mySharedTotal)}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, marginBottom: 8 }}>
               <span>Propina ({tp}%)</span><span>{fmt(myTip)}</span>
@@ -731,7 +808,7 @@ export default function SplitPay() {
             </div>
           </Card>
 
-          <Fab disabled={myCount === 0 || submitting} onClick={submitForm}>
+          <Fab disabled={(myCount === 0 && mySharedTotal === 0) || submitting} onClick={submitForm}>
             {submitting ? "Enviando…" : `✅ Confirmar · ${fmt(myItemsTotal + myTip)}`}
           </Fab>
         </>)}
@@ -828,6 +905,11 @@ export default function SplitPay() {
                   {Object.entries(cl.items || {}).map(([iid, q]) => {
                     const it = items.find(i => i.id === iid); if (!it) return null;
                     return <div key={iid} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, padding: "2px 0" }}><span>{q > 1 ? `${q}× ` : ""}{it.name}</span><span>{fmt(it.unitPrice * q)}</span></div>;
+                  })}
+                  {claims[p.id]?.shared && Object.keys(claims[p.id].shared).map(iid => {
+                    const it = items.find(i => i.id === iid); if (!it) return null;
+                    const n = sharedClaimCount(iid) || 1;
+                    return <div key={"sh-"+iid} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.hot, padding: "2px 0" }}><span>👥 {it.name} (÷{n})</span><span>{fmt(Math.round(it.unitPrice * it.qty / n))}</span></div>;
                   })}
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, padding: "4px 0 0", borderTop: `1px solid ${T.border}`, marginTop: 4 }}>
                     <span>Propina ({tp}%)</span><span>{fmt(t)}</span>
