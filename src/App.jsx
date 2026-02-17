@@ -181,48 +181,46 @@ export default function SplitPay() {
   const [copied, setCopied] = useState("");
   const fileRef = useRef(null);
 
-  // ─── OCR via Anthropic API ───
-  // Note: In artifact mode, the proxy doesn't support base64 images in API calls.
-  // The OCR works in the deployed Vercel version. In artifact, user sends photo to Claude.
+  // ─── OCR via serverless proxy (/api/ocr) ───
   const processOCR = async (base64Img) => {
     setView("processing"); setProgress(10); setOcrStatus("");
     const mediaType = base64Img.startsWith("data:image/png") ? "image/png" : "image/jpeg";
     const b64 = base64Img.split(",")[1];
     setProgress(30);
     
-    let res, data, text, parsed;
     try {
-      res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          stream: false,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: mediaType, data: b64 } },
-              { type: "text", text: "Analiza esta boleta de restaurante. Extrae TODOS los ítems. Responde SOLO un JSON array sin backticks ni explicación:\n[{\"name\":\"Nombre\",\"qty\":1,\"unitPrice\":5000}]\nSi dice \"2 Hamburguesa $8.500\" entonces qty:2, unitPrice:8500 (precio POR UNIDAD).\nPrecios como números enteros sin puntos ni separadores." }
-            ]
-          }]
-        })
+        body: JSON.stringify({ image: b64, mediaType })
       });
-      setProgress(60);
-      data = await res.json();
-      setProgress(80);
-      text = data.content?.map(c => c.text || "").join("") || "[]";
-      parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      setProgress(70);
       
-      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("empty");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `API error ${res.status}`);
+      }
+      
+      const parsed = await res.json();
+      setProgress(90);
+      
+      // Extract restaurant info
+      if (parsed.restaurant) setRestaurantName(parsed.restaurant);
+      if (parsed.branch) setRestaurantBranch(parsed.branch);
+      
+      // Extract items (handle both {items:[...]} and [...] formats)
+      const itemsList = parsed.items || (Array.isArray(parsed) ? parsed : []);
+      
+      if (!Array.isArray(itemsList) || itemsList.length === 0) {
+        throw new Error("No se encontraron ítems en la boleta");
+      }
 
-      setOcrItems(parsed.map(it => ({ id: uid(), name: it.name, qty: Number(it.qty)||1, unitPrice: Number(it.unitPrice)||0 })));
+      setOcrItems(itemsList.map(it => ({ id: uid(), name: it.name || "Ítem", qty: Number(it.qty)||1, unitPrice: Number(it.unitPrice)||0 })));
       setOcrStatus("ok");
       setProgress(100);
       setTimeout(() => setView("setup"), 400);
     } catch(e) {
-      // OCR failed (likely artifact proxy limitation) — show manual entry
-      setOcrStatus("No se pudo leer la boleta automáticamente. En la versión web funciona directo. Por ahora puedes:\n• Usar 'Cargar boleta de ejemplo' con los datos de Tanta\n• O agregar ítems manualmente");
+      setOcrStatus("Error: " + e.message + ". Puedes agregar los ítems manualmente o intentar con otra foto.");
       setOcrItems([]);
       setProgress(100);
       setView("setup");
@@ -237,14 +235,14 @@ export default function SplitPay() {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        const MAX = 400;
+        const MAX = 1200;
         let w = img.width, h = img.height;
         if (w > h) { if (w > MAX) { h = Math.round(h * MAX / w); w = MAX; } }
         else { if (h > MAX) { w = Math.round(w * MAX / h); h = MAX; } }
         canvas.width = w;
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        const compressed = canvas.toDataURL("image/jpeg", 0.5);
+        const compressed = canvas.toDataURL("image/jpeg", 0.75);
         processOCR(compressed);
       };
       img.onerror = () => {
