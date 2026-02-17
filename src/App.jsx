@@ -254,20 +254,13 @@ export default function SplitPay() {
     reader.readAsDataURL(file);
   };
 
-  const useDemo = () => {
-    setView("processing"); setProgress(0);
-    [15, 40, 65, 90, 100].forEach((p, i) =>
-      setTimeout(() => {
-        setProgress(p);
-        if (p === 100) setTimeout(() => {
-          setOcrItems(DEMO.map(it => ({ ...it, id: uid() })));
-          setRestaurantName("Tanta");
-          setRestaurantBranch("Isidora Goyenechea 3000, Las Condes");
-          setOcrStatus("ok");
-          setView("setup");
-        }, 300);
-      }, (i + 1) * 250)
-    );
+  const useManual = () => {
+    setOcrItems([]);
+    setRestaurantName("");
+    setRestaurantBranch("");
+    setOcrStatus("");
+    setShowAdd(true);
+    setView("setup");
   };
 
   // ─── Item CRUD ───
@@ -380,8 +373,10 @@ export default function SplitPay() {
   const whatsInvite = () => {
     const rName = roomData?.restaurant || restaurantName;
     const rBranch = roomData?.branch || restaurantBranch;
-    const loc = rName ? `\n📍 *${rName}*${rBranch ? ` — ${rBranch}` : ""}` : "";
-    return `🧾 *¡Llegó la cuenta!*${loc}\n\n🔑 Código: *${roomCode}*\n\n${ppl.map(p => `${p.avatar} ${p.name}`).join("\n")}\n\n💡 Entra y marca lo que consumiste.\n\n_Faltan ${ppl.length - confCount} por confirmar._`;
+    const loc = rName ? `\n📍 *${rName}*${rBranch ? `\n📌 ${rBranch}` : ""}` : "";
+    const url = getRoomURL(roomCode);
+    const nItems = items.length;
+    return `🧾 *¡Llegó la cuenta!*${loc}\n\n💰 ${nItems} ítems · Total: ${fmt(total)}\n\n👉 Entra acá y marca lo que consumiste:\n${url}\n\n${ppl.map(p => `${p.avatar} ${p.name}`).join("\n")}\n\n_Se abre en el navegador, sin descargar nada._`;
   };
 
   const whatsSummary = () => {
@@ -400,7 +395,7 @@ export default function SplitPay() {
         m += `   • Propina: ${fmt(pTip(p.id))}\n\n`;
       }
     });
-    m += `💸 ¡Cada uno envía su parte!`;
+    m += `💸 ¡Cada uno envía su parte!\n\n👉 Ver detalle: ${getRoomURL(roomCode)}`;
     return m;
   };
 
@@ -427,7 +422,7 @@ export default function SplitPay() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 320, margin: "0 auto" }}>
           <Btn color={T.accent} full onClick={() => fileRef.current?.click()} style={{ padding: 18, fontSize: 16, borderRadius: 16 }}>📷 Subir foto de la boleta</Btn>
           <input ref={fileRef} type="file" accept="image/*" onChange={handleUpload} style={{ display: "none" }} />
-          <GBtn full onClick={useDemo} style={{ padding: 16 }}>🧾 Cargar boleta Tanta (ejemplo)</GBtn>
+          <GBtn full onClick={useManual} style={{ padding: 16 }}>✏️ Ingresar valores manualmente</GBtn>
         </div>
 
         {/* Join section */}
