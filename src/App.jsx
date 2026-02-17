@@ -156,6 +156,25 @@ export default function SplitPay() {
   const [restaurantBranch, setRestaurantBranch] = useState("");
   const [ocrStatus, setOcrStatus] = useState(""); // "" | "ok" | error message
   const [progress, setProgress] = useState(0);
+  const [urlChecked, setUrlChecked] = useState(false);
+
+  // ─── URL Routing: auto-join room from /sala/CODE ───
+  useEffect(() => {
+    const match = window.location.pathname.match(/^\/sala\/([A-Za-z0-9-]+)$/i);
+    if (match) {
+      const code = match[1].toUpperCase();
+      fbGet(code).then(data => {
+        if (data) {
+          setRoomCode(code);
+          setRoomData(data);
+          setView("form");
+        }
+        setUrlChecked(true);
+      }).catch(() => setUrlChecked(true));
+    } else {
+      setUrlChecked(true);
+    }
+  }, []);
 
   // Setup state
   const [people, setPeople] = useState([]);
@@ -412,6 +431,15 @@ export default function SplitPay() {
   // ═══════════════════════════════════
 
   // ── HOME ──
+  if (!urlChecked) return (
+    <Shell>
+      <div style={{ padding: "100px 32px", textAlign: "center" }}>
+        <div style={{ fontSize: 40, marginBottom: 16 }}>⏳</div>
+        <p style={{ color: T.textSec }}>Cargando...</p>
+      </div>
+    </Shell>
+  );
+
   if (view === "home") return (
     <Shell>
       <div style={{ padding: "48px 28px 40px", textAlign: "center" }}>
