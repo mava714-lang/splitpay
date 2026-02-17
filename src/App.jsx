@@ -157,6 +157,10 @@ export default function SplitPay() {
   const [ocrStatus, setOcrStatus] = useState(""); // "" | "ok" | error message
   const [progress, setProgress] = useState(0);
   const [urlChecked, setUrlChecked] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try { return !localStorage.getItem("sp_onboarded"); } catch { return true; }
+  });
+  const [obSlide, setObSlide] = useState(0);
 
   // ─── URL Routing: auto-join room from /sala/CODE ───
   useEffect(() => {
@@ -480,6 +484,77 @@ export default function SplitPay() {
   // ═══════════════════════════════════
 
   // ── HOME ──
+  // ─── Onboarding slides ───
+  const obSlides = [
+    { emoji: "📸", title: "Sube la boleta", desc: "Toma una foto de la cuenta y la IA extrae todos los platos, bebidas y precios automáticamente.", color: T.accent },
+    { emoji: "👥", title: "Agrega al grupo", desc: "Escribe los nombres de quienes comparten la cuenta. Puedes marcar ítems compartidos con 👥.", color: T.hot },
+    { emoji: "📲", title: "Comparte el link", desc: "Envía el mensaje por WhatsApp. Cada persona abre el link y marca lo que consumió.", color: T.whatsapp },
+    { emoji: "✅", title: "¡Listo! Cada uno sabe cuánto poner", desc: "SplitPay calcula automáticamente cuánto debe cada persona, incluyendo propina proporcional.", color: T.accent },
+  ];
+
+  const finishOnboarding = () => {
+    try { localStorage.setItem("sp_onboarded", "1"); } catch {}
+    setShowOnboarding(false);
+  };
+
+  if (showOnboarding) return (
+    <Shell>
+      <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh", padding: "0 28px" }}>
+        {/* Skip */}
+        <div style={{ display: "flex", justifyContent: "flex-end", padding: "20px 0 0" }}>
+          <button onClick={finishOnboarding} style={{ background: "none", border: "none", color: T.textSec, fontSize: 15, cursor: "pointer", padding: "8px 0" }}>Omitir →</button>
+        </div>
+
+        {/* Slide content */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", paddingBottom: 40 }}>
+          <div style={{
+            width: 120, height: 120, borderRadius: 32, margin: "0 auto 32px",
+            background: `linear-gradient(145deg, ${obSlides[obSlide].color}22, ${obSlides[obSlide].color}44)`,
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 56,
+            boxShadow: `0 16px 48px ${obSlides[obSlide].color}33`,
+            transition: "all 0.3s ease"
+          }}>{obSlides[obSlide].emoji}</div>
+          <h2 style={{
+            fontSize: 28, fontWeight: 800, fontFamily: FT, margin: "0 0 16px",
+            color: obSlides[obSlide].color, transition: "color 0.3s ease"
+          }}>{obSlides[obSlide].title}</h2>
+          <p style={{ color: T.textSec, fontSize: 16, lineHeight: 1.7, margin: 0, maxWidth: 300 }}>
+            {obSlides[obSlide].desc}
+          </p>
+        </div>
+
+        {/* Dots + nav */}
+        <div style={{ paddingBottom: 48, display: "flex", flexDirection: "column", alignItems: "center", gap: 24 }}>
+          {/* Dots */}
+          <div style={{ display: "flex", gap: 8 }}>
+            {obSlides.map((_, i) => (
+              <div key={i} onClick={() => setObSlide(i)} style={{
+                width: i === obSlide ? 28 : 8, height: 8, borderRadius: 4,
+                background: i === obSlide ? obSlides[obSlide].color : T.border,
+                cursor: "pointer", transition: "all 0.3s ease"
+              }} />
+            ))}
+          </div>
+
+          {/* Button */}
+          {obSlide < obSlides.length - 1 ? (
+            <button onClick={() => setObSlide(obSlide + 1)} style={{
+              width: "100%", padding: "16px 32px", fontSize: 17, fontWeight: 700,
+              background: obSlides[obSlide].color, color: "#fff", border: "none",
+              borderRadius: 14, cursor: "pointer", fontFamily: FT
+            }}>Siguiente</button>
+          ) : (
+            <button onClick={finishOnboarding} style={{
+              width: "100%", padding: "16px 32px", fontSize: 17, fontWeight: 700,
+              background: `linear-gradient(135deg,${T.accent},${T.hot})`, color: "#fff", border: "none",
+              borderRadius: 14, cursor: "pointer", fontFamily: FT
+            }}>🚀 ¡Empezar!</button>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+
   if (!urlChecked) return (
     <Shell>
       <div style={{ padding: "100px 32px", textAlign: "center" }}>
@@ -520,6 +595,10 @@ export default function SplitPay() {
               <div style={{ fontSize: 11, color: T.textDim, marginTop: 1 }}>{l2}</div>
             </div>
           ))}
+        </div>
+
+        <div style={{ textAlign: "center", marginTop: 24, paddingBottom: 24 }}>
+          <button onClick={() => { setObSlide(0); setShowOnboarding(true); }} style={{ background: "none", border: "none", color: T.textSec, fontSize: 14, cursor: "pointer", textDecoration: "underline" }}>¿Cómo funciona?</button>
         </div>
       </div>
     </Shell>
