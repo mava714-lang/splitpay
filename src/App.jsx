@@ -350,6 +350,13 @@ export default function SplitPay() {
     }
   }, [roomCode]);
 
+  // ─── Refresh full room data ───
+  const refreshRoom = async () => {
+    if (!roomCode) return;
+    const data = await fbGet(roomCode);
+    if (data) setRoomData(data);
+  };
+
   // ─── Submit claim ───
   const submitForm = async () => {
     if (!selPerson || !roomCode || !roomData) return;
