@@ -19,3 +19,7 @@ export function subscribeToClaims(code, callback) {
 export async function submitClaim(code, personId, claimData) {
   await set(ref(db, `rooms/${code}/claims/${personId}`), { ...claimData, confirmedAt: Date.now() });
 }
+
+export async function updateRoom(code, roomData) {
+  await set(ref(db, `rooms/${code}`), { ...roomData, updatedAt: Date.now() });
+}

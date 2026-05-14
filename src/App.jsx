@@ -36,7 +36,7 @@ const genCode = () => {
   return w[Math.floor(Math.random() * w.length)] + "-" + uid().slice(0, 4);
 };
 
-import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, subscribeToClaims as fbSub } from "./db.js";
+import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, subscribeToClaims as fbSub, updateRoom as fbUpdate } from "./db.js";
 
 // ─── Demo Items ───
 const DEMO = [
@@ -161,6 +161,9 @@ export default function SplitPay() {
     try { return !localStorage.getItem("sp_onboarded"); } catch { return true; }
   });
   const [obSlide, setObSlide] = useState(0);
+  const [roomHistory, setRoomHistory] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("sp_rooms") || "[]"); } catch { return []; }
+  });
 
   // ─── URL Routing: auto-join room from /sala/CODE ───
   useEffect(() => {
@@ -172,6 +175,21 @@ export default function SplitPay() {
           setRoomCode(code);
           setRoomData(data);
           setView("form");
+          const entry = {
+            code,
+            restaurant: data.restaurant || "",
+            branch: data.branch || "",
+            total: data.items ? data.items.reduce((s, it) => s + it.unitPrice * it.qty, 0) : undefined,
+            createdAt: data.createdAt || Date.now(),
+            accessedAt: Date.now(),
+          };
+          try {
+            const prev = JSON.parse(localStorage.getItem("sp_rooms") || "[]");
+            const filtered = prev.filter(e => e.code !== code);
+            const updated = [entry, ...filtered].slice(0, 20);
+            localStorage.setItem("sp_rooms", JSON.stringify(updated));
+            setRoomHistory(updated);
+          } catch {}
         }
         setUrlChecked(true);
       }).catch(() => setUrlChecked(true));
@@ -199,6 +217,11 @@ export default function SplitPay() {
   const [selPerson, setSelPerson] = useState("");
   const [myQtys, setMyQtys] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  const [isEditingClaim, setIsEditingClaim] = useState(false);
+  const [justUpdated, setJustUpdated] = useState(false);
+  const [lastSubmittedPerson, setLastSubmittedPerson] = useState(null);
+  const [editingRoom, setEditingRoom] = useState(false);
+  const [roomSaveMsg, setRoomSaveMsg] = useState("");
 
   // UI state
   const [copied, setCopied] = useState("");
@@ -309,6 +332,24 @@ export default function SplitPay() {
   };
   const rmPerson = id => setPeople(prev => prev.filter(p => p.id !== id));
 
+  // ─── Save room to local history ───
+  const saveToHistory = (code, data) => {
+    setRoomHistory(prev => {
+      const entry = {
+        code,
+        restaurant: data.restaurant || "",
+        branch: data.branch || "",
+        total: data.items ? data.items.reduce((s, it) => s + it.unitPrice * it.qty, 0) : undefined,
+        createdAt: data.createdAt || Date.now(),
+        accessedAt: Date.now(),
+      };
+      const filtered = prev.filter(e => e.code !== code);
+      const updated = [entry, ...filtered].slice(0, 20);
+      try { localStorage.setItem("sp_rooms", JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+  };
+
   // ─── Create Room ───
   const createRoom = async () => {
     const code = genCode();
@@ -316,6 +357,7 @@ export default function SplitPay() {
     await fbCreate(code, data);
     setRoomCode(code);
     setRoomData(data);
+    saveToHistory(code, data);
     setView("roomCreated");
   };
 
@@ -328,6 +370,7 @@ export default function SplitPay() {
     if (data) {
       setRoomCode(code);
       setRoomData(data);
+      saveToHistory(code, data);
       setSelPerson("");
       setMyQtys({});
       setView("form");
@@ -362,6 +405,32 @@ export default function SplitPay() {
     if (data) setRoomData(data);
   };
 
+  // ─── Load room into setup state for inline editing ───
+  const loadRoomForEditing = () => {
+    if (!roomData) return;
+    setOcrItems(roomData.items || []);
+    setPeople(roomData.people || []);
+    setTipPercent(roomData.tipPercent ?? 10);
+    setRestaurantName(roomData.restaurant || "");
+    setRestaurantBranch(roomData.branch || "");
+    setEditId(null);
+    setShowAdd(false);
+    setEditingRoom(true);
+    setRoomSaveMsg("");
+  };
+
+  // ─── Save inline room edits to Firebase ───
+  const saveRoomEdits = async () => {
+    if (!roomCode || !roomData) return;
+    const updated = { ...roomData, items: ocrItems, people, tipPercent, restaurant: restaurantName, branch: restaurantBranch };
+    await fbUpdate(roomCode, updated);
+    setRoomData(updated);
+    saveToHistory(roomCode, updated);
+    setEditingRoom(false);
+    setRoomSaveMsg("✓ Sala actualizada");
+    setTimeout(() => setRoomSaveMsg(""), 3000);
+  };
+
   // ─── Submit claim ───
   const submitForm = async () => {
     if (!selPerson || !roomCode || !roomData) return;
@@ -377,9 +446,13 @@ export default function SplitPay() {
     await fbSubmit(roomCode, selPerson, { items: itemsClaim, shared: sharedClaim });
     const updated = await fbGet(roomCode);
     if (updated) setRoomData(updated);
+    const wasEditing = isEditingClaim;
+    setLastSubmittedPerson(selPerson);
     setMyQtys({});
     setSelPerson("");
     setSubmitting(false);
+    setIsEditingClaim(false);
+    setJustUpdated(wasEditing);
     setView("formDone");
   };
 
@@ -577,6 +650,12 @@ export default function SplitPay() {
           <GBtn full onClick={useManual} style={{ padding: 16 }}>✏️ Ingresar valores manualmente</GBtn>
         </div>
 
+        {roomHistory.length > 0 && (
+          <div style={{ maxWidth: 320, margin: "16px auto 0" }}>
+            <GBtn full onClick={() => setView("history")} style={{ padding: 16 }}>🕘 Ver historial de salas ({roomHistory.length})</GBtn>
+          </div>
+        )}
+
         {/* Join section */}
         <div style={{ marginTop: 32, background: T.card, borderRadius: 16, padding: 20, border: `1px solid ${T.border}`, maxWidth: 320, margin: "32px auto 0" }}>
           <Lbl>¿TE COMPARTIERON UN CÓDIGO?</Lbl>
@@ -743,45 +822,141 @@ export default function SplitPay() {
   }
 
   // ── ROOM CREATED (share code + WhatsApp) ──
-  if (view === "roomCreated") return (
-    <Shell>
-      <Hdr title="¡Sala creada!" sub={restaurantName ? `📍 ${restaurantName}` : "Comparte el código con el grupo"} />
-      <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
-        {/* Big code display */}
-        <Card style={{ textAlign: "center", background: `linear-gradient(145deg,${T.accentSoft},${T.hotSoft})` }}>
-          <Lbl>CÓDIGO DE SALA</Lbl>
-          <div style={{ fontSize: 38, fontWeight: 800, fontFamily: FT, letterSpacing: 3, color: T.accent, marginTop: 4, marginBottom: 8, textShadow: `0 0 30px ${T.accentGlow}` }}>{roomCode}</div>
-          <div style={{ fontSize: 13, color: T.textSec }}>Comparte este código para que cada uno marque lo suyo</div>
-        </Card>
+  if (view === "roomCreated") {
+    const noClaimsYet = Object.keys(roomData?.claims || {}).length === 0;
 
-        {/* WhatsApp message preview */}
-        <Card style={{ background: "#1a2e1a", border: "1px solid rgba(37,211,102,0.2)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <span style={{ fontSize: 20 }}>💬</span>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.whatsapp }}>Mensaje para WhatsApp</div>
+    if (editingRoom) return (
+      <Shell>
+        <Hdr title="Editar sala" sub={restaurantName || undefined} onBack={() => { setEditingRoom(false); setEditId(null); setShowAdd(false); }} />
+        <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <Card style={{ background: T.warnSoft, borderColor: T.warn, borderWidth: 1.5, borderStyle: "solid" }}>
+            <div style={{ fontWeight: 700, color: T.warn, marginBottom: 4 }}>✏️ Editando sala</div>
+            <div style={{ fontSize: 12, color: T.textSec }}>Los cambios se guardarán en Firebase y serán visibles para todos.</div>
+          </Card>
+
+          <Card style={{ background: `linear-gradient(145deg,${T.surface},${T.card})`, borderColor: T.accentBorder }}>
+            <Lbl>RESTAURANTE</Lbl>
+            <Inp placeholder="Nombre del local" value={restaurantName} onChange={e => setRestaurantName(e.target.value)} style={{ marginBottom: 8, fontSize: 17, fontWeight: 700, fontFamily: FT }} />
+            <Inp placeholder="Sucursal / dirección (opcional)" value={restaurantBranch} onChange={e => setRestaurantBranch(e.target.value)} style={{ fontSize: 13 }} />
+          </Card>
+
+          <Lbl>ÍTEMS</Lbl>
+          {ocrItems.map(it => (
+            <div key={it.id}>
+              {editId === it.id ? (
+                <Card>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <Inp value={ef.n} onChange={e => setEf(f => ({ ...f, n: e.target.value }))} placeholder="Nombre" />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <Inp value={ef.q} onChange={e => setEf(f => ({ ...f, q: e.target.value }))} placeholder="Cant" type="number" style={{ width: 70 }} />
+                      <Inp value={ef.p} onChange={e => setEf(f => ({ ...f, p: e.target.value }))} placeholder="Precio unit." type="number" style={{ flex: 1 }} />
+                      <Btn onClick={() => saveEdit(it.id)} style={{ padding: "12px 16px" }}>✓</Btn>
+                    </div>
+                  </div>
+                </Card>
+              ) : (
+                <Card>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{it.name}</div>
+                      <div style={{ fontSize: 12, color: T.textSec }}>{it.qty > 1 ? `${it.qty}× ` : ""}{fmt(it.unitPrice)} c/u</div>
+                    </div>
+                    <button onClick={() => startEdit(it)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: 6, color: T.textSec }}>✏️</button>
+                    <button onClick={() => rmItem(it.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 14, padding: 6, color: T.danger }}>🗑</button>
+                  </div>
+                </Card>
+              )}
+            </div>
+          ))}
+          {showAdd ? (
+            <Card style={{ border: `1px dashed ${T.accentBorder}` }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <Inp placeholder="Nombre" value={niName} onChange={e => setNiName(e.target.value)} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Inp placeholder="Cant" type="number" value={niQty} onChange={e => setNiQty(e.target.value)} style={{ width: 70 }} />
+                  <Inp placeholder="Precio unit." type="number" value={niPrice} onChange={e => setNiPrice(e.target.value)} style={{ flex: 1 }} />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}><Btn onClick={addItem} full>Agregar</Btn><GBtn onClick={() => setShowAdd(false)}>✕</GBtn></div>
+              </div>
+            </Card>
+          ) : (
+            <GBtn full onClick={() => setShowAdd(true)}>+ Agregar ítem</GBtn>
+          )}
+
+          <Lbl>PROPINA</Lbl>
+          <Card style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+            <div style={{ display: "flex", gap: 6 }}>
+              {[0, 5, 10, 15, 20].map(p => (
+                <button key={p} onClick={() => setTipPercent(p)} style={{ background: tipPercent === p ? T.accent : T.surface, color: tipPercent === p ? "#000" : T.textSec, border: `1.5px solid ${tipPercent === p ? T.accent : T.border}`, borderRadius: 20, padding: "8px 14px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: FONT }}>{p}%</button>
+              ))}
+            </div>
+          </Card>
+
+          <Lbl>PARTICIPANTES</Lbl>
+          {people.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {people.map(p => (
+                <div key={p.id} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 24, padding: "8px 10px 8px 14px", display: "inline-flex", alignItems: "center", gap: 7, fontSize: 14, fontWeight: 600 }}>
+                  <span>{p.avatar}</span><span>{p.name}</span>
+                  <span onClick={() => rmPerson(p.id)} style={{ cursor: "pointer", color: T.danger, fontSize: 16, lineHeight: 1, marginLeft: 2 }}>×</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Inp placeholder="Agregar persona…" value={pName} onChange={e => setPName(e.target.value)} onKeyDown={e => e.key === "Enter" && addPerson()} style={{ flex: 1 }} />
+            <Btn onClick={addPerson} style={{ padding: "12px 20px" }}>+</Btn>
           </div>
-          <div style={{ background: T.bg, borderRadius: 10, padding: 14, fontSize: 13, color: T.textSec, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto", border: `1px solid ${T.border}`, marginBottom: 12 }}>
-            {whatsInvite()}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+            <Btn color={T.accent} full onClick={saveRoomEdits} disabled={ocrItems.length === 0 || people.length < 2}>💾 Guardar cambios</Btn>
+            <GBtn onClick={() => { setEditingRoom(false); setEditId(null); setShowAdd(false); }}>Cancelar</GBtn>
           </div>
-          <Btn color={T.whatsapp} full onClick={() => cp(whatsInvite(), "✅ Mensaje copiado")} style={{ borderRadius: 12 }}>
-            {copied === "✅ Mensaje copiado" ? "✅ ¡Copiado!" : "📋 Copiar mensaje para WhatsApp"}
+        </div>
+      </Shell>
+    );
+
+    return (
+      <Shell>
+        <Hdr title="¡Sala creada!" sub={restaurantName ? `📍 ${restaurantName}` : "Comparte el código con el grupo"} />
+        <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <Card style={{ textAlign: "center", background: `linear-gradient(145deg,${T.accentSoft},${T.hotSoft})` }}>
+            <Lbl>CÓDIGO DE SALA</Lbl>
+            <div style={{ fontSize: 38, fontWeight: 800, fontFamily: FT, letterSpacing: 3, color: T.accent, marginTop: 4, marginBottom: 8, textShadow: `0 0 30px ${T.accentGlow}` }}>{roomCode}</div>
+            <div style={{ fontSize: 13, color: T.textSec }}>Comparte este código para que cada uno marque lo suyo</div>
+          </Card>
+
+          <Card style={{ background: "#1a2e1a", border: "1px solid rgba(37,211,102,0.2)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 20 }}>💬</span>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.whatsapp }}>Mensaje para WhatsApp</div>
+            </div>
+            <div style={{ background: T.bg, borderRadius: 10, padding: 14, fontSize: 13, color: T.textSec, lineHeight: 1.6, whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto", border: `1px solid ${T.border}`, marginBottom: 12 }}>
+              {whatsInvite()}
+            </div>
+            <Btn color={T.whatsapp} full onClick={() => cp(whatsInvite(), "✅ Mensaje copiado")} style={{ borderRadius: 12 }}>
+              {copied === "✅ Mensaje copiado" ? "✅ ¡Copiado!" : "📋 Copiar mensaje para WhatsApp"}
+            </Btn>
+          </Card>
+
+          <Btn color={T.accent} full onClick={() => cp(roomCode, "✅ Código copiado")} style={{ borderRadius: 14 }}>
+            {copied === "✅ Código copiado" ? "✅ ¡Copiado!" : "🔑 Copiar solo el código"}
           </Btn>
-        </Card>
 
-        {/* Copy code only */}
-        <Btn color={T.accent} full onClick={() => cp(roomCode, "✅ Código copiado")} style={{ borderRadius: 14 }}>
-          {copied === "✅ Código copiado" ? "✅ ¡Copiado!" : "🔑 Copiar solo el código"}
-        </Btn>
+          <Btn color={T.hot} full onClick={goToForm} style={{ borderRadius: 14 }}>📝 Ir al formulario</Btn>
 
-        {/* Go to form */}
-        <Btn color={T.hot} full onClick={goToForm} style={{ borderRadius: 14 }}>
-          📝 Ir al formulario
-        </Btn>
+          <GBtn full onClick={() => setView("dashboard")}>📊 Ver Dashboard</GBtn>
 
-        <GBtn full onClick={() => setView("dashboard")}>📊 Ver Dashboard</GBtn>
-      </div>
-    </Shell>
-  );
+          {noClaimsYet && (
+            <GBtn full onClick={loadRoomForEditing} style={{ color: T.warn, borderColor: T.warn }}>✏️ Editar sala</GBtn>
+          )}
+          {roomSaveMsg && (
+            <div style={{ textAlign: "center", color: T.accent, fontWeight: 700, fontSize: 15 }}>{roomSaveMsg}</div>
+          )}
+        </div>
+      </Shell>
+    );
+  }
 
   // ── FORM (each person fills this) ──
   if (view === "form") return (
@@ -798,12 +973,19 @@ export default function SplitPay() {
         </Card>
 
         <Lbl>¿QUIÉN ERES?</Lbl>
-        <Sel value={selPerson} onChange={e => { setSelPerson(e.target.value); setMyQtys({}); }}>
+        <Sel value={selPerson} onChange={e => { setSelPerson(e.target.value); setMyQtys({}); setIsEditingClaim(false); }}>
           <option value="">— Elige tu nombre —</option>
-          {availPeople.map(p => <option key={p.id} value={p.id}>{p.avatar} {p.name}</option>)}
+          {(isEditingClaim ? ppl : availPeople).map(p => <option key={p.id} value={p.id}>{p.avatar} {p.name}</option>)}
         </Sel>
 
-        {availPeople.length === 0 && ppl.length > 0 && (
+        {isEditingClaim && selPerson && (
+          <Card style={{ background: T.warnSoft, borderColor: T.warn, borderWidth: 1.5, borderStyle: "solid" }}>
+            <div style={{ fontSize: 14, color: T.warn, fontWeight: 700 }}>✏️ Editando respuesta anterior</div>
+            <div style={{ fontSize: 12, color: T.textSec, marginTop: 4 }}>Tus selecciones anteriores están pre-cargadas. Al confirmar se sobrescribirán.</div>
+          </Card>
+        )}
+
+        {availPeople.length === 0 && ppl.length > 0 && !isEditingClaim && (
           <Card style={{ background: T.accentSoft, textAlign: "center" }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>🎉</div>
             <div style={{ fontSize: 15, fontWeight: 700, color: T.accent }}>¡Todos confirmaron!</div>
@@ -888,7 +1070,7 @@ export default function SplitPay() {
           </Card>
 
           <Fab disabled={(myCount === 0 && mySharedTotal === 0) || submitting} onClick={submitForm}>
-            {submitting ? "Enviando…" : `✅ Confirmar · ${fmt(myItemsTotal + myTip)}`}
+            {submitting ? "Enviando…" : isEditingClaim ? `🔄 Actualizar · ${fmt(myItemsTotal + myTip)}` : `✅ Confirmar · ${fmt(myItemsTotal + myTip)}`}
           </Fab>
         </>)}
       </div>
@@ -898,21 +1080,87 @@ export default function SplitPay() {
   // ── FORM DONE ──
   if (view === "formDone") {
     const rem = ppl.length - confCount;
+    const canCorrect = lastSubmittedPerson && roomData?.claims?.[lastSubmittedPerson];
+    const handleCorrect = () => {
+      if (!canCorrect) return;
+      const claim = roomData.claims[lastSubmittedPerson];
+      const rebuilt = {};
+      Object.entries(claim.items || {}).forEach(([iid, q]) => { rebuilt[iid] = q; });
+      Object.keys(claim.shared || {}).forEach(iid => { rebuilt["sh_" + iid] = 1; });
+      setMyQtys(rebuilt);
+      setSelPerson(lastSubmittedPerson);
+      setIsEditingClaim(true);
+      setJustUpdated(false);
+      setView("form");
+    };
     return (
       <Shell>
-        <Hdr title="¡Confirmado!" />
+        <Hdr title={justUpdated ? "¡Actualizado!" : "¡Confirmado!"} />
         <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ textAlign: "center", padding: "28px 0 8px" }}>
             <div style={{ width: 88, height: 88, borderRadius: 24, margin: "0 auto 16px", background: T.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 44, animation: "pop .5s ease", boxShadow: `0 0 40px ${T.accentGlow}` }}>✅</div>
-            <h2 style={{ fontSize: 24, fontWeight: 800, fontFamily: FT, margin: "0 0 6px" }}>¡Registrado!</h2>
+            <h2 style={{ fontSize: 24, fontWeight: 800, fontFamily: FT, margin: "0 0 6px" }}>
+              {justUpdated ? "Respuesta actualizada ✓" : "¡Registrado!"}
+            </h2>
             <p style={{ color: T.textSec, fontSize: 14 }}>{rem > 0 ? `Faltan ${rem} persona${rem > 1 ? "s" : ""}` : "🎉 ¡Todos confirmaron!"}</p>
           </div>
+          {canCorrect && (
+            <GBtn full onClick={handleCorrect} style={{ color: T.warn, borderColor: T.warn }}>✏️ Corregir mi reclamo</GBtn>
+          )}
           {rem > 0 ? (
             <Btn color={T.accent} full onClick={goToForm}>📝 Siguiente persona</Btn>
           ) : (
             <Btn color={T.accent} full onClick={() => setView("dashboard")}>📊 Ver Resumen Final</Btn>
           )}
           <GBtn full onClick={() => setView("dashboard")}>📊 Ver Dashboard</GBtn>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── HISTORY ──
+  if (view === "history") {
+    const goToHistoryRoom = async (code) => {
+      const data = await fbGet(code);
+      if (data) {
+        setRoomCode(code);
+        setRoomData(data);
+        saveToHistory(code, data);
+        setView("dashboard");
+      }
+    };
+    const clearHistory = () => {
+      setRoomHistory([]);
+      try { localStorage.removeItem("sp_rooms"); } catch {}
+    };
+    return (
+      <Shell>
+        <Hdr title="Historial de salas" onBack={() => setView("home")} />
+        <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {roomHistory.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "60px 0", color: T.textDim }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📭</div>
+              <div>No hay salas recientes</div>
+            </div>
+          ) : roomHistory.map(entry => (
+            <Card key={entry.code}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: T.text, marginBottom: 2 }}>{entry.restaurant || "Sin nombre"}</div>
+                  <div style={{ fontSize: 12, color: T.textDim, fontWeight: 700, letterSpacing: 1 }}>{entry.code}</div>
+                  {entry.branch && <div style={{ fontSize: 12, color: T.textSec, marginTop: 1 }}>{entry.branch}</div>}
+                  <div style={{ fontSize: 11, color: T.textDim, marginTop: 4 }}>
+                    {new Date(entry.accessedAt).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric" })}
+                    {entry.total ? ` · ${fmt(entry.total)}` : ""}
+                  </div>
+                </div>
+                <Btn color={T.accent} onClick={() => goToHistoryRoom(entry.code)} style={{ padding: "10px 16px", fontSize: 13, borderRadius: 10 }}>Ver sala</Btn>
+              </div>
+            </Card>
+          ))}
+          {roomHistory.length > 0 && (
+            <GBtn full onClick={clearHistory} style={{ marginTop: 8, color: T.danger, borderColor: T.danger }}>🗑️ Limpiar historial</GBtn>
+          )}
         </div>
       </Shell>
     );
