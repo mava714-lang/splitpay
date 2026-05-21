@@ -36,7 +36,8 @@ const genCode = () => {
   return w[Math.floor(Math.random() * w.length)] + "-" + uid().slice(0, 4);
 };
 
-import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, subscribeToClaims as fbSub, updateRoom as fbUpdate } from "./db.js";
+import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, subscribeToClaims as fbSub, updateRoom as fbUpdate, saveUserRoom, getUserRooms } from "./db.js";
+import { watchAuth, loginWithGoogle, logout } from "./auth.js";
 
 // ─── Demo Items ───
 const DEMO = [
@@ -116,6 +117,15 @@ const Lbl = ({ children }) => (
   <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, textTransform: "uppercase", color: T.textDim, marginBottom: 10 }}>{children}</div>
 );
 
+const GoogleG = ({ size = 18 }) => (
+  <svg width={size} height={size} viewBox="0 0 48 48" style={{ flexShrink: 0 }}>
+    <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/>
+    <path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/>
+    <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/>
+    <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/>
+  </svg>
+);
+
 const Fab = ({ children, disabled, ...p }) => (
   <button disabled={disabled} {...p} style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", maxWidth: 440, width: "calc(100% - 32px)", background: disabled ? T.cardAlt : T.accent, color: "#000", border: "none", borderRadius: 16, padding: "17px 32px", fontSize: 16, fontWeight: 800, cursor: disabled ? "default" : "pointer", fontFamily: FT, zIndex: 40, boxShadow: disabled ? "none" : `0 8px 40px ${T.accentGlow}`, opacity: disabled ? .4 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>{children}</button>
 );
@@ -148,7 +158,7 @@ const Stepper = ({ value, max, onChange }) => {
 export default function SplitPay() {
   // ─── Core state ───
   const [view, setView] = useState("home");
-  // home | processing | setup | roomCreated | joinEntry | form | formDone | dashboard
+  // home | processing | setup | roomCreated | joinEntry | form | formDone | history | profile | dashboard
   const [roomCode, setRoomCode] = useState(null);
   const [roomData, setRoomData] = useState(null); // { items, people, tipPercent, claims }
   const [ocrItems, setOcrItems] = useState([]);
@@ -165,6 +175,11 @@ export default function SplitPay() {
     try { return JSON.parse(localStorage.getItem("sp_rooms") || "[]"); } catch { return []; }
   });
 
+  // ─── Auth state ───
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const userRef = useRef(null);
+
   // ─── URL Routing: auto-join room from /sala/CODE ───
   useEffect(() => {
     const match = window.location.pathname.match(/^\/sala\/([A-Za-z0-9-]+)$/i);
@@ -174,28 +189,50 @@ export default function SplitPay() {
         if (data) {
           setRoomCode(code);
           setRoomData(data);
+          setSelPerson(matchPersonId(data));
           setView("form");
-          const entry = {
-            code,
-            restaurant: data.restaurant || "",
-            branch: data.branch || "",
-            total: data.items ? data.items.reduce((s, it) => s + it.unitPrice * it.qty, 0) : undefined,
-            createdAt: data.createdAt || Date.now(),
-            accessedAt: Date.now(),
-          };
-          try {
-            const prev = JSON.parse(localStorage.getItem("sp_rooms") || "[]");
-            const filtered = prev.filter(e => e.code !== code);
-            const updated = [entry, ...filtered].slice(0, 20);
-            localStorage.setItem("sp_rooms", JSON.stringify(updated));
-            setRoomHistory(updated);
-          } catch {}
+          saveToHistory(code, data);
         }
         setUrlChecked(true);
       }).catch(() => setUrlChecked(true));
     } else {
       setUrlChecked(true);
     }
+  }, []);
+
+  // ─── Auth: watch session + sync cloud history on login ───
+  const syncHistoryOnLogin = async (uid) => {
+    let local = [];
+    try { local = JSON.parse(localStorage.getItem("sp_rooms") || "[]"); } catch {}
+    let cloud = [];
+    try { cloud = await getUserRooms(uid); } catch {}
+    const byCode = {};
+    [...cloud, ...local].forEach(e => {
+      if (!e || !e.code) return;
+      const prev = byCode[e.code];
+      if (!prev || (e.accessedAt || 0) > (prev.accessedAt || 0)) byCode[e.code] = e;
+    });
+    const merged = Object.values(byCode)
+      .sort((a, b) => (b.accessedAt || 0) - (a.accessedAt || 0))
+      .slice(0, 20);
+    setRoomHistory(merged);
+    try { localStorage.setItem("sp_rooms", JSON.stringify(merged)); } catch {}
+    for (const e of merged) {
+      try { await saveUserRoom(uid, e); } catch {}
+    }
+  };
+
+  useEffect(() => {
+    const unsub = watchAuth((u) => {
+      setUser(u);
+      userRef.current = u;
+      setAuthReady(true);
+      if (u) {
+        if (u.displayName) setPName(prev => prev || u.displayName);
+        syncHistoryOnLogin(u.uid);
+      }
+    });
+    return () => unsub();
   }, []);
 
   // Setup state
@@ -332,23 +369,62 @@ export default function SplitPay() {
   };
   const rmPerson = id => setPeople(prev => prev.filter(p => p.id !== id));
 
-  // ─── Save room to local history ───
+  // ─── Save room to history (localStorage + cloud when signed in) ───
   const saveToHistory = (code, data) => {
+    const entry = {
+      code,
+      restaurant: data.restaurant || "",
+      branch: data.branch || "",
+      total: data.items ? data.items.reduce((s, it) => s + it.unitPrice * it.qty, 0) : null,
+      createdAt: data.createdAt || Date.now(),
+      accessedAt: Date.now(),
+    };
     setRoomHistory(prev => {
-      const entry = {
-        code,
-        restaurant: data.restaurant || "",
-        branch: data.branch || "",
-        total: data.items ? data.items.reduce((s, it) => s + it.unitPrice * it.qty, 0) : undefined,
-        createdAt: data.createdAt || Date.now(),
-        accessedAt: Date.now(),
-      };
       const filtered = prev.filter(e => e.code !== code);
       const updated = [entry, ...filtered].slice(0, 20);
       try { localStorage.setItem("sp_rooms", JSON.stringify(updated)); } catch {}
       return updated;
     });
+    if (userRef.current) {
+      saveUserRoom(userRef.current.uid, entry).catch(() => {});
+    }
   };
+
+  // ─── Auth actions + identity helpers ───
+  const handleLogin = async () => {
+    try { await loginWithGoogle(); } catch {}
+  };
+  const handleLogout = async () => {
+    try { await logout(); } catch {}
+    setView("home");
+  };
+  const matchPersonId = (data) => {
+    const u = userRef.current;
+    if (!u || !u.displayName || !data || !Array.isArray(data.people)) return "";
+    const m = data.people.find(p => p.name && p.name.toLowerCase() === u.displayName.toLowerCase());
+    if (!m) return "";
+    return (data.claims && data.claims[m.id]) ? "" : m.id;
+  };
+  const authChip = () => {
+    if (!authReady) return null;
+    return (
+      <button onClick={() => user ? setView("profile") : handleLogin()}
+        title={user ? "Mi perfil" : "Iniciar sesión"}
+        style={{ width: 36, height: 36, borderRadius: 10, border: `1px solid ${T.border}`, background: T.card, cursor: "pointer", padding: 0, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        {user && user.photoURL
+          ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          : <span style={{ fontSize: 16 }}>{user ? "🙂" : "👤"}</span>}
+      </button>
+    );
+  };
+
+  // Preselect the signed-in user in the join form once the session resolves
+  useEffect(() => {
+    if (user && view === "form" && !selPerson && roomData) {
+      const id = matchPersonId(roomData);
+      if (id) setSelPerson(id);
+    }
+  }, [user]);
 
   // ─── Create Room ───
   const createRoom = async () => {
@@ -371,7 +447,7 @@ export default function SplitPay() {
       setRoomCode(code);
       setRoomData(data);
       saveToHistory(code, data);
-      setSelPerson("");
+      setSelPerson(matchPersonId(data));
       setMyQtys({});
       setView("form");
     } else {
@@ -381,7 +457,7 @@ export default function SplitPay() {
 
   // ─── Go to form from room created ───
   const goToForm = () => {
-    setSelPerson("");
+    setSelPerson(matchPersonId(roomData));
     setMyQtys({});
     setView("form");
   };
@@ -639,6 +715,11 @@ export default function SplitPay() {
 
   if (view === "home") return (
     <Shell>
+      {authReady && (
+        <div style={{ position: "absolute", top: 14, right: 16, zIndex: 10 }}>
+          {authChip()}
+        </div>
+      )}
       <div style={{ padding: "48px 28px 40px", textAlign: "center" }}>
         <div style={{ width: 96, height: 96, borderRadius: 28, margin: "0 auto 24px", background: `linear-gradient(145deg,${T.accentSoft},${T.hotSoft})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 46, boxShadow: `0 16px 48px ${T.accentGlow}` }}>🧾</div>
         <h1 style={{ fontSize: 40, fontWeight: 800, fontFamily: FT, letterSpacing: -1.5, margin: "0 0 8px", background: `linear-gradient(135deg,${T.accent},${T.hot})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>SplitPay</h1>
@@ -648,6 +729,16 @@ export default function SplitPay() {
           <Btn color={T.accent} full onClick={() => fileRef.current?.click()} style={{ padding: 18, fontSize: 16, borderRadius: 16 }}>📷 Subir foto de la boleta</Btn>
           <input ref={fileRef} type="file" accept="image/*" onChange={handleUpload} style={{ display: "none" }} />
           <GBtn full onClick={useManual} style={{ padding: 16 }}>✏️ Ingresar valores manualmente</GBtn>
+          {authReady && !user && (
+            <GBtn full onClick={handleLogin} style={{ padding: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+              <GoogleG /> Continuar con Google
+            </GBtn>
+          )}
+          {user && (
+            <GBtn full onClick={() => setView("profile")} style={{ padding: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              👋 Hola, {(user.displayName || "").split(" ")[0] || "tú"}
+            </GBtn>
+          )}
         </div>
 
         {roomHistory.length > 0 && (
@@ -710,7 +801,7 @@ export default function SplitPay() {
     const tip = Math.round(sub * tipPercent / 100);
     return (
       <Shell>
-        <Hdr title="Preparar cuenta" sub={`${ocrItems.length} ítems · ${people.length} personas`} onBack={() => setView("home")} />
+        <Hdr title="Preparar cuenta" sub={`${ocrItems.length} ítems · ${people.length} personas`} onBack={() => setView("home")} right={authChip()} />
         <div style={{ padding: "20px 16px 120px", display: "flex", flexDirection: "column", gap: 14 }}>
 
           {/* Restaurant info */}
@@ -918,7 +1009,7 @@ export default function SplitPay() {
 
     return (
       <Shell>
-        <Hdr title="¡Sala creada!" sub={restaurantName ? `📍 ${restaurantName}` : "Comparte el código con el grupo"} />
+        <Hdr title="¡Sala creada!" sub={restaurantName ? `📍 ${restaurantName}` : "Comparte el código con el grupo"} right={authChip()} />
         <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
           <Card style={{ textAlign: "center", background: `linear-gradient(145deg,${T.accentSoft},${T.hotSoft})` }}>
             <Lbl>CÓDIGO DE SALA</Lbl>
@@ -963,7 +1054,7 @@ export default function SplitPay() {
     <Shell>
       <Hdr title={roomData?.restaurant || `Sala ${roomCode}`} sub={`${roomData?.branch ? roomData.branch + " · " : ""}${confCount}/${ppl.length} confirmados`}
         onBack={() => confCount > 0 ? setView("dashboard") : setView("roomCreated")}
-        right={confCount > 0 ? <Btn onClick={() => setView("dashboard")} color={T.cardAlt} style={{ padding: "8px 14px", fontSize: 12, color: T.text, border: `1px solid ${T.border}` }}>📊</Btn> : null}
+        right={<div style={{ display: "flex", gap: 8 }}>{confCount > 0 && <Btn onClick={() => setView("dashboard")} color={T.cardAlt} style={{ padding: "8px 14px", fontSize: 12, color: T.text, border: `1px solid ${T.border}` }}>📊</Btn>}{authChip()}</div>}
       />
       <div style={{ padding: "20px 16px 140px", display: "flex", flexDirection: "column", gap: 16 }}>
         <Card style={{ background: T.accentSoft, borderColor: T.accentBorder }}>
@@ -1095,7 +1186,7 @@ export default function SplitPay() {
     };
     return (
       <Shell>
-        <Hdr title={justUpdated ? "¡Actualizado!" : "¡Confirmado!"} />
+        <Hdr title={justUpdated ? "¡Actualizado!" : "¡Confirmado!"} right={authChip()} />
         <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ textAlign: "center", padding: "28px 0 8px" }}>
             <div style={{ width: 88, height: 88, borderRadius: 24, margin: "0 auto 16px", background: T.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 44, animation: "pop .5s ease", boxShadow: `0 0 40px ${T.accentGlow}` }}>✅</div>
@@ -1135,7 +1226,7 @@ export default function SplitPay() {
     };
     return (
       <Shell>
-        <Hdr title="Historial de salas" onBack={() => setView("home")} />
+        <Hdr title="Historial de salas" onBack={() => setView("home")} right={authChip()} />
         <div style={{ padding: "20px 16px 40px", display: "flex", flexDirection: "column", gap: 12 }}>
           {roomHistory.length === 0 ? (
             <div style={{ textAlign: "center", padding: "60px 0", color: T.textDim }}>
@@ -1166,6 +1257,37 @@ export default function SplitPay() {
     );
   }
 
+  // ── PROFILE ──
+  if (view === "profile") return (
+    <Shell>
+      <Hdr title="Mi perfil" onBack={() => setView("home")} />
+      <div style={{ padding: "24px 16px 40px", display: "flex", flexDirection: "column", gap: 16 }}>
+        {user ? (<>
+          <Card style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {user.photoURL
+              ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" style={{ width: 64, height: 64, borderRadius: 20, objectFit: "cover", flexShrink: 0 }} />
+              : <div style={{ width: 64, height: 64, borderRadius: 20, background: T.accentSoft, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30, flexShrink: 0 }}>🙂</div>}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 18, fontWeight: 800, fontFamily: FT }}>{user.displayName || "Usuario"}</div>
+              <div style={{ fontSize: 13, color: T.textSec, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user.email}</div>
+            </div>
+          </Card>
+          <GBtn full onClick={() => setView("history")} style={{ padding: 16 }}>🕘 Ver historial de salas ({roomHistory.length})</GBtn>
+          <Btn color={T.danger} full onClick={handleLogout} style={{ borderRadius: 14 }}>Cerrar sesión</Btn>
+        </>) : (<>
+          <Card style={{ textAlign: "center", padding: "32px 20px" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>👤</div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Inicia sesión</div>
+            <div style={{ fontSize: 13, color: T.textSec, lineHeight: 1.5 }}>Guarda tu historial de salas en la nube y autocompleta tu nombre al crear o unirte a una sala.</div>
+          </Card>
+          <GBtn full onClick={handleLogin} style={{ padding: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
+            <GoogleG /> Continuar con Google
+          </GBtn>
+        </>)}
+      </div>
+    </Shell>
+  );
+
   // ── DASHBOARD ──
   if (view === "dashboard") {
     const pctDone = ppl.length > 0 ? Math.round(confCount / ppl.length * 100) : 0;
@@ -1177,7 +1299,7 @@ export default function SplitPay() {
       <Shell>
         <Hdr title={roomData?.restaurant || "Dashboard"} sub={`${roomData?.branch ? roomData.branch + " · " : ""}${confCount}/${ppl.length}`}
           onBack={goToForm}
-          right={<Btn onClick={refreshRoom} color={T.cardAlt} style={{ padding: "8px 14px", fontSize: 12, color: T.text, border: `1px solid ${T.border}` }}>🔄</Btn>}
+          right={<div style={{ display: "flex", gap: 8 }}><Btn onClick={refreshRoom} color={T.cardAlt} style={{ padding: "8px 14px", fontSize: 12, color: T.text, border: `1px solid ${T.border}` }}>🔄</Btn>{authChip()}</div>}
         />
         <div style={{ padding: "20px 16px 120px", display: "flex", flexDirection: "column", gap: 14 }}>
           <Card style={{ display: "flex", alignItems: "center", gap: 20, background: allDone ? T.accentSoft : T.card }}>

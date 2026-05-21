@@ -23,3 +23,12 @@ export async function submitClaim(code, personId, claimData) {
 export async function updateRoom(code, roomData) {
   await set(ref(db, `rooms/${code}`), { ...roomData, updatedAt: Date.now() });
 }
+
+export async function saveUserRoom(uid, entry) {
+  await set(ref(db, `users/${uid}/rooms/${entry.code}`), entry);
+}
+
+export async function getUserRooms(uid) {
+  const snap = await get(ref(db, `users/${uid}/rooms`));
+  return snap.exists() ? Object.values(snap.val()) : [];
+}
