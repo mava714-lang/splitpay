@@ -31,6 +31,7 @@ splitpay/
 ├── api/
 │   └── ocr.js            # Vercel serverless function — calls Anthropic API
 ├── src/
+│   ├── auth.js           # Optional Google sign-in (Firebase Auth): watchAuth, loginWithGoogle, logout
 │   ├── main.jsx          # React entry point
 │   ├── App.jsx           # Entire app (single file, ~1020 lines)
 │   ├── firebase.js       # Firebase init and config
@@ -60,7 +61,9 @@ The entire frontend lives in `src/App.jsx`. It renders one of 8 views based on a
 | `"roomCreated"` | Displays room code, copy buttons, WhatsApp message |
 | `"form"` | Participant selects items and quantities |
 | `"formDone"` | Confirmation + prompt for next person |
-| `"dashboard"` | Real-time breakdown per person, export summary |
+| `"dashboard"` | Real-time breakdown per person, full receipt, export summary |
+| `"history"` | List of rooms the signed-in user created/joined (`users/{uid}/rooms`) |
+| `"profile"` | Signed-in user's profile / logout |
 Two "screens" are **not** `view` values and short-circuit rendering before it:
 - `showOnboarding` — 4-slide tutorial (persisted via `localStorage` key `sp_onboarded`).
 - `!urlChecked` — "Cargando..." while the `/sala/CODE` URL is being resolved.
@@ -75,9 +78,12 @@ Navigation happens via `setView("...")` calls — no React Router. The one excep
 - While editing, `remainQty` adds back the person's own previous quantity so they can keep/lower it.
 - `submitForm` overwrites `claims/{personId}` (Firebase `set`). `removeMyClaim` deletes it (`deleteClaim` in `db.js`), returning the person to pending.
 - `myQtys` keys: item id → qty for individual items; `"sh_" + itemId` → `1` for shared items (stripped of the prefix when saved).
-- `editClaim(pid)` is the entry point from the dashboard and `formDone` ("Editar mi selección", uses `lastPerson`).
+- `editClaim(pid)` is the entry point from the dashboard ("Editar selección de X") and `formDone` ("Corregir mi reclamo", uses `lastSubmittedPerson`). `isEditing` is derived (`selPerson` already has a claim); there is no separate editing flag.
+- `justUpdated` switches the `formDone` copy to "¡Actualizado!" after an edit.
 - The dashboard has a "Boleta completa" section: every item with claimed/total, who took it, and shared-item splits.
-- No identity/auth: anyone with the link can edit anyone's claim (accepted trade-off). Concurrent edits are last-write-wins.
+- **Optional Google login** (`auth.js`, `authChip`, `matchPersonId`): a signed-in user is auto-matched to a person by name when that person has no claim yet; rooms are saved to `users/{uid}/rooms` for the history view. Login is never required to use a room.
+- **Room editing after creation**: `loadRoomForEditing` / `saveRoomEdits` (`updateRoom`) reuse the `setup` state to change items, people and tip of an existing room.
+- No identity/auth for claims: anyone with the link can edit anyone's claim (accepted trade-off). Concurrent edits are last-write-wins.
 
 ### Inline UI Component System
 
@@ -137,7 +143,7 @@ Database helpers live in `src/db.js`. Firebase is initialized in `src/firebase.j
 
 Flow:
 1. Receives `{ image: "<base64>", mediaType: "image/jpeg|image/png" }`.
-2. Sends to Claude Sonnet 4 vision with a prompt to extract Chilean restaurant receipt data.
+2. Sends to Claude Sonnet (model id set in `api/ocr.js`, currently `claude-sonnet-4-6`) vision with a prompt to extract Chilean restaurant receipt data.
 3. Returns `{ restaurant, branch, items: [{ name, qty, unitPrice }] }`.
 
 The frontend compresses images to max 1200px before sending. JSON is extracted with a fallback regex if Claude wraps the response in markdown.
