@@ -1166,7 +1166,11 @@ export default function SplitPay() {
                   <div style={{ fontSize: 15, fontWeight: 600, color: on ? T.text : T.textSec }}>{it.name}</div>
                   <div style={{ fontSize: 13, color: T.textDim, display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
                     <span>{fmt(it.unitPrice)} c/u</span><span>·</span>
-                    {rem > 0 ? <span style={{ color: T.textSec }}>{rem} disponible{rem !== 1 ? "s" : ""}</span> : <span style={{ color: T.warn }}>Agotado</span>}
+                    {(() => {
+                      const free = rem - myQ; // units still free for me to add
+                      if (myQ > 0) return <span style={{ color: T.accent, fontWeight: 700 }}>Tienes {myQ}{free > 0 ? ` · ${free} libre${free !== 1 ? "s" : ""}` : ""}</span>;
+                      return free > 0 ? <span style={{ color: T.textSec }}>{free} disponible{free !== 1 ? "s" : ""}</span> : <span style={{ color: T.warn }}>Agotado</span>;
+                    })()}
                   </div>
                   {on && <div style={{ fontSize: 14, fontWeight: 700, color: T.accent, marginTop: 4 }}>{myQ} × {fmt(it.unitPrice)} = {fmt(it.unitPrice * myQ)}</div>}
                 </div>
