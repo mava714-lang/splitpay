@@ -36,7 +36,7 @@ const genCode = () => {
   return w[Math.floor(Math.random() * w.length)] + "-" + uid().slice(0, 4);
 };
 
-import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, subscribeToClaims as fbSub, updateRoom as fbUpdate, saveUserRoom, getUserRooms } from "./db.js";
+import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, deleteClaim as fbDelete, subscribeToClaims as fbSub, updateRoom as fbUpdate, saveUserRoom, getUserRooms } from "./db.js";
 import { watchAuth, loginWithGoogle, logout } from "./auth.js";
 
 // ─── Demo Items ───
@@ -254,7 +254,6 @@ export default function SplitPay() {
   const [selPerson, setSelPerson] = useState("");
   const [myQtys, setMyQtys] = useState({});
   const [submitting, setSubmitting] = useState(false);
-  const [isEditingClaim, setIsEditingClaim] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
   const [lastSubmittedPerson, setLastSubmittedPerson] = useState(null);
   const [editingRoom, setEditingRoom] = useState(false);
@@ -462,6 +461,22 @@ export default function SplitPay() {
     setView("form");
   };
 
+  // Rebuild the form selection (myQtys) from an existing claim
+  const loadClaim = pid => {
+    const c = claims[pid];
+    if (!c) return {};
+    const q = { ...(c.items || {}) };
+    Object.keys(c.shared || {}).forEach(iid => { q["sh_" + iid] = 1; });
+    return q;
+  };
+
+  // ─── Edit an existing claim ───
+  const editClaim = pid => {
+    setSelPerson(pid);
+    setMyQtys(loadClaim(pid));
+    setView("form");
+  };
+
   
 
   // Subscribe to real-time updates
@@ -522,14 +537,27 @@ export default function SplitPay() {
     await fbSubmit(roomCode, selPerson, { items: itemsClaim, shared: sharedClaim });
     const updated = await fbGet(roomCode);
     if (updated) setRoomData(updated);
-    const wasEditing = isEditingClaim;
+    const wasEditing = isEditing;
     setLastSubmittedPerson(selPerson);
     setMyQtys({});
     setSelPerson("");
     setSubmitting(false);
-    setIsEditingClaim(false);
     setJustUpdated(wasEditing);
     setView("formDone");
+  };
+
+  // ─── Remove a confirmation (person goes back to "pending") ───
+  const removeMyClaim = async () => {
+    if (!selPerson || !roomCode || !claims[selPerson]) return;
+    if (!window.confirm("¿Quitar tu confirmación? Volverás a quedar como pendiente.")) return;
+    setSubmitting(true);
+    await fbDelete(roomCode, selPerson);
+    const updated = await fbGet(roomCode);
+    if (updated) setRoomData(updated);
+    else setRoomData(prev => prev ? { ...prev, claims: {} } : prev);
+    setMyQtys({});
+    setSelPerson("");
+    setSubmitting(false);
   };
 
   // ─── Calculations ───
@@ -570,6 +598,7 @@ export default function SplitPay() {
   const pTot = pid => pSub(pid) + pTip(pid);
 
   const availPeople = ppl.filter(p => !claims[p.id]);
+  const isEditing = !!(selPerson && claims[selPerson]); // editing an already-confirmed claim
   const confCount = Object.keys(claims).length;
   const allDone = confCount === ppl.length && ppl.length > 0;
 
@@ -1064,19 +1093,19 @@ export default function SplitPay() {
         </Card>
 
         <Lbl>¿QUIÉN ERES?</Lbl>
-        <Sel value={selPerson} onChange={e => { setSelPerson(e.target.value); setMyQtys({}); setIsEditingClaim(false); }}>
+        <Sel value={selPerson} onChange={e => { setSelPerson(e.target.value); setMyQtys(loadClaim(e.target.value)); }}>
           <option value="">— Elige tu nombre —</option>
-          {(isEditingClaim ? ppl : availPeople).map(p => <option key={p.id} value={p.id}>{p.avatar} {p.name}</option>)}
+          {ppl.map(p => <option key={p.id} value={p.id}>{p.avatar} {p.name}{claims[p.id] ? " ✓ (editar)" : ""}</option>)}
         </Sel>
 
-        {isEditingClaim && selPerson && (
+        {isEditing && (
           <Card style={{ background: T.warnSoft, borderColor: T.warn, borderWidth: 1.5, borderStyle: "solid" }}>
             <div style={{ fontSize: 14, color: T.warn, fontWeight: 700 }}>✏️ Editando respuesta anterior</div>
-            <div style={{ fontSize: 12, color: T.textSec, marginTop: 4 }}>Tus selecciones anteriores están pre-cargadas. Al confirmar se sobrescribirán.</div>
+            <div style={{ fontSize: 12, color: T.textSec, marginTop: 4 }}>Tus selecciones anteriores están pre-cargadas. Al pulsar "Actualizar" se sobrescribirán.</div>
           </Card>
         )}
 
-        {availPeople.length === 0 && ppl.length > 0 && !isEditingClaim && (
+        {availPeople.length === 0 && ppl.length > 0 && !selPerson && (
           <Card style={{ background: T.accentSoft, textAlign: "center" }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>🎉</div>
             <div style={{ fontSize: 15, fontWeight: 700, color: T.accent }}>¡Todos confirmaron!</div>
@@ -1123,7 +1152,8 @@ export default function SplitPay() {
           <Lbl>¿QUÉ CONSUMISTE?</Lbl>
           {items.filter(it => !it.shared).map(it => {
             const myQ = myQtys[it.id] || 0;
-            const rem = remainQty(it.id);
+            // When editing, my own previous claim doesn't count against availability
+            const rem = remainQty(it.id) + (isEditing ? (claims[selPerson]?.items?.[it.id] || 0) : 0);
             const on = myQ > 0;
             return (
               <div key={it.id} style={{
@@ -1136,7 +1166,11 @@ export default function SplitPay() {
                   <div style={{ fontSize: 15, fontWeight: 600, color: on ? T.text : T.textSec }}>{it.name}</div>
                   <div style={{ fontSize: 13, color: T.textDim, display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
                     <span>{fmt(it.unitPrice)} c/u</span><span>·</span>
-                    {rem > 0 ? <span style={{ color: T.textSec }}>{rem} disponible{rem !== 1 ? "s" : ""}</span> : <span style={{ color: T.warn }}>Agotado</span>}
+                    {(() => {
+                      const free = rem - myQ; // units still free for me to add
+                      if (myQ > 0) return <span style={{ color: T.accent, fontWeight: 700 }}>Tienes {myQ}{free > 0 ? ` · ${free} libre${free !== 1 ? "s" : ""}` : ""}</span>;
+                      return free > 0 ? <span style={{ color: T.textSec }}>{free} disponible{free !== 1 ? "s" : ""}</span> : <span style={{ color: T.warn }}>Agotado</span>;
+                    })()}
                   </div>
                   {on && <div style={{ fontSize: 14, fontWeight: 700, color: T.accent, marginTop: 4 }}>{myQ} × {fmt(it.unitPrice)} = {fmt(it.unitPrice * myQ)}</div>}
                 </div>
@@ -1160,8 +1194,14 @@ export default function SplitPay() {
             </div>
           </Card>
 
+          {isEditing && (
+            <GBtn full onClick={removeMyClaim} disabled={submitting} style={{ color: T.danger, borderColor: T.danger }}>
+              🗑 Quitar mi confirmación
+            </GBtn>
+          )}
+
           <Fab disabled={(myCount === 0 && mySharedTotal === 0) || submitting} onClick={submitForm}>
-            {submitting ? "Enviando…" : isEditingClaim ? `🔄 Actualizar · ${fmt(myItemsTotal + myTip)}` : `✅ Confirmar · ${fmt(myItemsTotal + myTip)}`}
+            {submitting ? "Enviando…" : `${isEditing ? "🔄 Actualizar" : "✅ Confirmar"} · ${fmt(myItemsTotal + myTip)}`}
           </Fab>
         </>)}
       </div>
@@ -1174,15 +1214,8 @@ export default function SplitPay() {
     const canCorrect = lastSubmittedPerson && roomData?.claims?.[lastSubmittedPerson];
     const handleCorrect = () => {
       if (!canCorrect) return;
-      const claim = roomData.claims[lastSubmittedPerson];
-      const rebuilt = {};
-      Object.entries(claim.items || {}).forEach(([iid, q]) => { rebuilt[iid] = q; });
-      Object.keys(claim.shared || {}).forEach(iid => { rebuilt["sh_" + iid] = 1; });
-      setMyQtys(rebuilt);
-      setSelPerson(lastSubmittedPerson);
-      setIsEditingClaim(true);
       setJustUpdated(false);
-      setView("form");
+      editClaim(lastSubmittedPerson);
     };
     return (
       <Shell>
@@ -1363,7 +1396,40 @@ export default function SplitPay() {
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, padding: "4px 0 0", borderTop: `1px solid ${T.border}`, marginTop: 4 }}>
                     <span>Propina ({tp}%)</span><span>{fmt(t)}</span>
                   </div>
+                  <GBtn full onClick={() => editClaim(p.id)} style={{ marginTop: 10, padding: "9px 14px", fontSize: 13 }}>✏️ Editar selección de {p.name}</GBtn>
                 </>)}
+              </Card>
+            );
+          })}
+
+          <Lbl>BOLETA COMPLETA</Lbl>
+          {items.map(it => {
+            const isSh = !!it.shared;
+            const who = ppl.filter(p => isSh ? claims[p.id]?.shared?.[it.id] : (claims[p.id]?.items?.[it.id] || 0) > 0);
+            const cq = claimedQty(it.id);
+            const over = !isSh && cq > it.qty;
+            const full = isSh ? who.length > 0 : cq === it.qty;
+            const col = over ? T.danger : full ? T.accent : isSh ? T.hot : T.warn;
+            const status = isSh
+              ? (who.length ? `${who.length} se sumaron · ${fmt(Math.round(it.unitPrice * it.qty / who.length))} c/u` : "Nadie se ha sumado")
+              : `${cq}/${it.qty} reclamado${cq !== 1 ? "s" : ""}`;
+            return (
+              <Card key={"rc-" + it.id} style={{ padding: "12px 16px", borderLeft: `3px solid ${col}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{isSh ? "👥 " : ""}{it.qty > 1 ? `${it.qty}× ` : ""}{it.name}</div>
+                    <div style={{ fontSize: 12, color: col, fontWeight: 700, marginTop: 2 }}>{status}</div>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: T.textSec }}>{fmt(it.unitPrice * it.qty)}</div>
+                </div>
+                {who.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                    {who.map(p => {
+                      const q = isSh ? 0 : claims[p.id].items[it.id];
+                      return <Tag key={p.id} color={isSh ? T.warn : T.accent}>{p.avatar} {p.name}{q > 1 ? ` ×${q}` : ""}</Tag>;
+                    })}
+                  </div>
+                )}
               </Card>
             );
           })}
