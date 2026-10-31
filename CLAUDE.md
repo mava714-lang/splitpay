@@ -34,7 +34,7 @@ splitpay/
 │   ├── main.jsx          # React entry point
 │   ├── App.jsx           # Entire app (single file, ~1020 lines)
 │   ├── firebase.js       # Firebase init and config
-│   └── db.js             # Firebase database helpers
+│   └── db.js             # Firebase helpers: createRoom, getRoom, submitClaim, deleteClaim, subscribeToClaims
 ├── public/
 │   └── manifest.json     # PWA manifest
 ├── index.html            # HTML shell, Google Fonts, dark bg (#06080c)
@@ -61,9 +61,23 @@ The entire frontend lives in `src/App.jsx`. It renders one of 8 views based on a
 | `"form"` | Participant selects items and quantities |
 | `"formDone"` | Confirmation + prompt for next person |
 | `"dashboard"` | Real-time breakdown per person, export summary |
-| *(onboarding overlay)* | 4-slide tutorial shown on first visit |
+Two "screens" are **not** `view` values and short-circuit rendering before it:
+- `showOnboarding` — 4-slide tutorial (persisted via `localStorage` key `sp_onboarded`).
+- `!urlChecked` — "Cargando..." while the `/sala/CODE` URL is being resolved.
 
-Navigation happens via `setView("...")` calls — no React Router.
+Render order of the `if` blocks: onboarding → loading → `home` → `processing` → `setup` → `roomCreated` → `form` → `formDone` → `dashboard`. (`joinEntry` in a code comment is unused.)
+
+Navigation happens via `setView("...")` calls — no React Router. The one exception is deep links: a `useEffect` reads `window.location.pathname`; `/sala/CODE` loads the room and jumps straight to `form`. `vercel.json` rewrites make this work, and the WhatsApp invite message contains this URL (`getRoomURL`).
+
+### Claim lifecycle (form / dashboard)
+
+- `form` lists **all** people in the dropdown; confirmed ones are marked `✓ (editar)`. Choosing one preloads `myQtys` from their claim (`loadClaim`), and `isEditing` becomes true.
+- While editing, `remainQty` adds back the person's own previous quantity so they can keep/lower it.
+- `submitForm` overwrites `claims/{personId}` (Firebase `set`). `removeMyClaim` deletes it (`deleteClaim` in `db.js`), returning the person to pending.
+- `myQtys` keys: item id → qty for individual items; `"sh_" + itemId` → `1` for shared items (stripped of the prefix when saved).
+- `editClaim(pid)` is the entry point from the dashboard and `formDone` ("Editar mi selección", uses `lastPerson`).
+- The dashboard has a "Boleta completa" section: every item with claimed/total, who took it, and shared-item splits.
+- No identity/auth: anyone with the link can edit anyone's claim (accepted trade-off). Concurrent edits are last-write-wins.
 
 ### Inline UI Component System
 
@@ -176,13 +190,13 @@ npx vercel dev
 ### State Management
 
 - All state is in `App.jsx` via `useState`. No context, no global store.
-- Real-time Firebase subscriptions are set up with `onValue` and cleaned up on unmount.
-- `subscribeToToClaims()` is the main real-time listener for the dashboard.
+- Only `rooms/{code}/claims` is subscribed in real time (`subscribeToClaims`, imported as `fbSub`, in a `useEffect` on `[roomCode]`). Items, people and tip are read once (`getRoom`) or via `refreshRoom` (🔄).
+- `items`, `ppl`, `tp`, `claims` are derived as `roomData?.x || localState`.
 
 ### IDs
 
-- Room codes: `"WORD-XXXXXXXX"` (random word prefix + 8 random chars).
-- Item/person IDs: `Math.random().toString(36).slice(2, 9)`.
+- Room codes: `"WORD-XXXX"` (random word from a fixed list + 4 random chars), e.g. `ASADO-A1B2`.
+- Item/person IDs: `uid()` = 6 uppercase alphanumeric chars.
 
 ### Language
 
@@ -219,4 +233,6 @@ There are currently no automated tests. When adding tests, prefer **Vitest** (Vi
 - **Firebase config keys are intentional** in `src/firebase.js` — Firebase public config is not a secret.
 - **The OCR function is Chilean-receipt-specific.** The Claude prompt targets boletas/facturas; adjust the prompt if expanding to other regions.
 - **`vercel.json` rewrites** ensure all non-API paths serve `index.html`. Don't break this when adding new API routes.
+- **Security depends on Firebase Realtime Database rules**, which are not in this repo (configured in the Firebase console). The client config is public by design; room codes are the only access control.
+- **OCR progress bar is fake** (fixed jumps in `processOCR`), not real progress.
 - **`tipPercent` is stored as a number (e.g., `10` for 10%)**, not a decimal.

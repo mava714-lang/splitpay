@@ -1,5 +1,5 @@
 import { db } from './firebase.js';
-import { ref, set, get, onValue, off } from 'firebase/database';
+import { ref, set, get, remove, onValue, off } from 'firebase/database';
 
 export async function createRoom(code, roomData) {
   await set(ref(db, `rooms/${code}`), { ...roomData, createdAt: Date.now() });
@@ -18,4 +18,8 @@ export function subscribeToClaims(code, callback) {
 
 export async function submitClaim(code, personId, claimData) {
   await set(ref(db, `rooms/${code}/claims/${personId}`), { ...claimData, confirmedAt: Date.now() });
+}
+
+export async function deleteClaim(code, personId) {
+  await remove(ref(db, `rooms/${code}/claims/${personId}`));
 }
