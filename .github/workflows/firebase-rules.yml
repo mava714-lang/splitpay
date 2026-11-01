@@ -1,0 +1,46 @@
+name: Firebase security rules
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - database.rules.json
+      - tests/database.rules.test.mjs
+      - scripts/firebase-rules.mjs
+      - .github/workflows/firebase-rules.yml
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "show = solo mostrar las reglas publicadas · deploy = probar y publicar database.rules.json"
+        type: choice
+        options: [show, deploy]
+        default: show
+
+concurrency:
+  group: firebase-rules
+  cancel-in-progress: false
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install tools
+        run: npm i --no-save firebase-tools@13.29.1 @firebase/rules-unit-testing@3.0.4 firebase@10.14.1 google-auth-library@9.15.1
+
+      - name: Test rules in emulator
+        if: github.event_name == 'push' || inputs.mode == 'deploy'
+        run: npx firebase emulators:exec --project splitpay-rules-test --only database "node tests/database.rules.test.mjs"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+      - name: Show / deploy rules
+        run: node scripts/firebase-rules.mjs ${{ github.event_name == 'push' && 'deploy' || inputs.mode }}
