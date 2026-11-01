@@ -31,12 +31,37 @@ const uid = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const fmt = n => `$${Math.round(Number(n)).toLocaleString("es-CL")}`;
 function getRoomURL(code) { return `${window.location.origin}/sala/${code}`; }
 
+// ─── Privacy / personal data (Ley 21.719) ───
+const PRIVACY_VERSION = "2026-11-01";          // bump when the privacy text changes; stored with each consent
+const PRIVACY_CONTACT = "mava714@gmail.com";   // data-controller contact shown in the privacy policy
+const ACCOUNT_TYPES = ["Cuenta Vista / RUT", "Cuenta Corriente", "Cuenta de Ahorro"];
+const EMPTY_PAY = { name: "", rut: "", bank: "", accountType: ACCOUNT_TYPES[0], accountNumber: "", email: "" };
+const PAY_REQUIRED = ["name", "rut", "bank", "accountNumber"];
+const PAY_LABELS = { name: "Nombre", rut: "RUT", bank: "Banco", accountType: "Tipo de cuenta", accountNumber: "N° de cuenta", email: "Email" };
+
+// Chilean mobile → "+569XXXXXXXX" (or "" if invalid)
+const normPhone = raw => {
+  let d = String(raw || "").replace(/\D/g, "");
+  if (d.startsWith("56")) d = d.slice(2);
+  return /^9\d{8}$/.test(d) ? "+56" + d : "";
+};
+const fmtPhone = p => p ? `${p.slice(0, 3)} ${p.slice(3, 4)} ${p.slice(4, 8)} ${p.slice(8)}` : "";
+const waLink = (phone, text) => `https://wa.me/${phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`;
+const payText = pay => [pay.name, pay.rut && `RUT ${pay.rut}`, pay.bank, pay.accountType, pay.accountNumber && `N° ${pay.accountNumber}`, pay.email].filter(Boolean).join("\n");
+
+const Check = ({ checked, onChange, children }) => (
+  <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: "pointer", fontSize: 13, color: T.textSec, lineHeight: 1.5 }}>
+    <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} style={{ width: 20, height: 20, marginTop: 1, accentColor: T.accent, flexShrink: 0 }} />
+    <span>{children}</span>
+  </label>
+);
+
 const genCode = () => {
   const w = ["ASADO","SUSHI","PIZZA","BIRRA","TACO","BRUNCH","CENA","POKE"];
   return w[Math.floor(Math.random() * w.length)] + "-" + uid().slice(0, 4);
 };
 
-import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, deleteClaim as fbDelete, subscribeToClaims as fbSub, updateRoom as fbUpdate, saveUserRoom, getUserRooms } from "./db.js";
+import { createRoom as fbCreate, getRoom as fbGet, submitClaim as fbSubmit, deleteClaim as fbDelete, subscribeToClaims as fbSub, updateRoom as fbUpdate, saveUserRoom, getUserRooms, setRoomOwner, subscribeToPaid, setPaid as fbSetPaid, saveContact, deleteContact, getContacts } from "./db.js";
 import { watchAuth, loginWithGoogle, logout } from "./auth.js";
 
 // ─── Demo Items ───
@@ -182,6 +207,12 @@ export default function SplitPay() {
 
   // ─── URL Routing: auto-join room from /sala/CODE ───
   useEffect(() => {
+    if (/^\/privacidad\/?$/i.test(window.location.pathname)) {
+      setPrivacyFrom("home");
+      setView("privacy");
+      setUrlChecked(true);
+      return;
+    }
     const match = window.location.pathname.match(/^\/sala\/([A-Za-z0-9-]+)$/i);
     if (match) {
       const code = match[1].toUpperCase();
@@ -258,6 +289,16 @@ export default function SplitPay() {
   const [lastSubmittedPerson, setLastSubmittedPerson] = useState(null);
   const [editingRoom, setEditingRoom] = useState(false);
   const [roomSaveMsg, setRoomSaveMsg] = useState("");
+
+  // Payments + contact state
+  const [pay, setPay] = useState(EMPTY_PAY);          // organizer's transfer data (setup / edit room)
+  const [payConsent, setPayConsent] = useState(false);
+  const [contacts, setContacts] = useState({});        // owner-only: { personId: { phone, ... } }
+  const [phoneInput, setPhoneInput] = useState("");
+  const [phoneConsent, setPhoneConsent] = useState(false);
+  const [contactBusy, setContactBusy] = useState(false);
+  const [contactTick, setContactTick] = useState(0);   // re-render after localStorage changes
+  const [privacyFrom, setPrivacyFrom] = useState("home");
 
   // UI state
   const [copied, setCopied] = useState("");
@@ -429,7 +470,12 @@ export default function SplitPay() {
   const createRoom = async () => {
     const code = genCode();
     const data = { items: ocrItems, people, tipPercent, restaurant: restaurantName, branch: restaurantBranch, claims: {}, createdAt: Date.now() };
+    const payment = buildPayment();
+    if (payment) data.payment = payment;
+    if (user) data.ownerUid = user.uid;
     await fbCreate(code, data);
+    // Remember on this device that we created the room, so the organizer can claim ownership after signing in
+    try { localStorage.setItem("sp_owner_" + code, "1"); } catch {}
     setRoomCode(code);
     setRoomData(data);
     saveToHistory(code, data);
@@ -489,6 +535,88 @@ export default function SplitPay() {
     }
   }, [roomCode]);
 
+  // Payment status in real time (rooms/{code}/paid)
+  useEffect(() => {
+    if (roomCode) {
+      const unsub = subscribeToPaid(roomCode, (paid) => {
+        setRoomData(prev => prev ? { ...prev, paid: paid || {} } : prev);
+      });
+      return () => unsub();
+    }
+  }, [roomCode]);
+
+  // ─── Ownership: the organizer (signed in with Google) can read the group's contacts ───
+  const isOwner = !!(user && roomData?.ownerUid && roomData.ownerUid === user.uid);
+  const isCreatorDevice = (() => { try { return !!roomCode && localStorage.getItem("sp_owner_" + roomCode) === "1"; } catch { return false; } })();
+
+  // Creator signed in after creating the room → claim ownership (rules only allow it while unclaimed)
+  useEffect(() => {
+    if (!user || !roomCode || !roomData || roomData.ownerUid || !isCreatorDevice) return;
+    setRoomOwner(roomCode, user.uid)
+      .then(() => setRoomData(prev => prev ? { ...prev, ownerUid: user.uid } : prev))
+      .catch(() => {});
+  }, [user, roomCode, roomData?.ownerUid]);
+
+  // Owner loads contacts (phones) when opening the dashboard
+  useEffect(() => {
+    if (isOwner && roomCode && view === "dashboard") {
+      getContacts(roomCode).then(c => setContacts(c || {})).catch(() => setContacts({}));
+    }
+  }, [isOwner, roomCode, view]);
+
+  // ─── Organizer transfer data ───
+  const payFilled = Object.entries(pay).some(([k, v]) => k !== "accountType" && String(v).trim());
+  const payComplete = PAY_REQUIRED.every(k => String(pay[k]).trim());
+  const payValid = !payFilled || (payComplete && payConsent);
+  const payBlockMsg = !payFilled ? "" : !payComplete ? "Completa nombre, RUT, banco y N° de cuenta" : !payConsent ? "Acepta compartir tus datos de transferencia" : "";
+  const buildPayment = () => {
+    if (!payFilled || !payValid) return null;
+    const out = {};
+    Object.keys(EMPTY_PAY).forEach(k => { out[k] = String(pay[k] || "").trim(); });
+    out.consentAt = Date.now();
+    out.consentVersion = PRIVACY_VERSION;
+    return out;
+  };
+
+  // ─── Paid status ───
+  const togglePaid = async (pid) => {
+    if (!roomCode) return;
+    const now = !roomData?.paid?.[pid];
+    setRoomData(prev => {
+      if (!prev) return prev;
+      const paid = { ...(prev.paid || {}) };
+      if (now) paid[pid] = { at: Date.now() }; else delete paid[pid]; // never store undefined (Firebase rejects it)
+      return { ...prev, paid };
+    });
+    try { await fbSetPaid(roomCode, pid, now); } catch {}
+  };
+
+  // ─── Diner phone (optional, with consent) ───
+  const contactKey = pid => `sp_contact_${roomCode}_${pid}`;
+  const hasSavedContact = pid => { try { return !!localStorage.getItem(contactKey(pid)); } catch { return false; } };
+  const saveMyPhone = async (pid) => {
+    const phone = normPhone(phoneInput);
+    if (!phone || !phoneConsent || !roomCode) return;
+    setContactBusy(true);
+    try {
+      await saveContact(roomCode, pid, { phone, consentAt: Date.now(), consentVersion: PRIVACY_VERSION });
+      try { localStorage.setItem(contactKey(pid), "1"); } catch {}
+      setPhoneInput(""); setPhoneConsent(false);
+    } catch { alert("No se pudo guardar tu número. Intenta de nuevo."); }
+    setContactBusy(false); setContactTick(t => t + 1);
+  };
+  const deleteMyPhone = async (pid) => {
+    if (!roomCode) return;
+    setContactBusy(true);
+    try {
+      await deleteContact(roomCode, pid);
+      try { localStorage.removeItem(contactKey(pid)); } catch {}
+    } catch { alert("No se pudo borrar tu número. Intenta de nuevo."); }
+    setContactBusy(false); setContactTick(t => t + 1);
+  };
+
+  const openPrivacy = () => { setPrivacyFrom(view); setView("privacy"); window.scrollTo(0, 0); };
+
   // ─── Refresh full room data ───
   const refreshRoom = async () => {
     if (!roomCode) return;
@@ -504,6 +632,8 @@ export default function SplitPay() {
     setTipPercent(roomData.tipPercent ?? 10);
     setRestaurantName(roomData.restaurant || "");
     setRestaurantBranch(roomData.branch || "");
+    setPay(roomData.payment ? { ...EMPTY_PAY, ...roomData.payment } : EMPTY_PAY);
+    setPayConsent(!!roomData.payment);
     setEditId(null);
     setShowAdd(false);
     setEditingRoom(true);
@@ -514,6 +644,8 @@ export default function SplitPay() {
   const saveRoomEdits = async () => {
     if (!roomCode || !roomData) return;
     const updated = { ...roomData, items: ocrItems, people, tipPercent, restaurant: restaurantName, branch: restaurantBranch };
+    const payment = buildPayment();
+    if (payment) updated.payment = payment; else delete updated.payment;
     await fbUpdate(roomCode, updated);
     setRoomData(updated);
     saveToHistory(roomCode, updated);
@@ -643,6 +775,116 @@ export default function SplitPay() {
 
   const cp = (txt, lb) => { navigator.clipboard?.writeText(txt); setCopied(lb); setTimeout(() => setCopied(""), 2500); };
 
+  // ─── Reminder text for WhatsApp (owner → diner) ───
+  const reminderText = p => {
+    const rName = roomData?.restaurant ? ` de ${roomData.restaurant}` : "";
+    const url = getRoomURL(roomCode);
+    if (!claims[p.id]) return `Hola ${p.name}! 👋 Falta que marques lo que consumiste en la cuenta${rName}:\n${url}`;
+    const pm = roomData?.payment;
+    return `Hola ${p.name}! 🧾 Tu parte de la cuenta${rName} es ${fmt(pTot(p.id))}.` +
+      (pm ? `\n\nDatos para transferir:\n${payText(pm)}` : "") +
+      `\n\nDetalle: ${url}`;
+  };
+
+  const linkBtn = { color: T.textSec, background: "none", border: "none", padding: 0, textDecoration: "underline", cursor: "pointer", fontSize: "inherit", fontFamily: "inherit" };
+
+  // ─── Organizer: transfer data editor (setup + edit room) ───
+  const paymentEditor = () => (
+    <Card>
+      <Lbl>💸 DATOS PARA QUE TE TRANSFIERAN (OPCIONAL)</Lbl>
+      <div style={{ fontSize: 12, color: T.textSec, marginTop: -4, marginBottom: 12, lineHeight: 1.5 }}>Si pagaste tú, cada persona verá cuánto te debe y estos datos para transferirte.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <Inp placeholder="Nombre del titular" value={pay.name} onChange={e => setPay(p => ({ ...p, name: e.target.value }))} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <Inp placeholder="RUT" value={pay.rut} onChange={e => setPay(p => ({ ...p, rut: e.target.value }))} style={{ flex: 1 }} />
+          <Inp placeholder="Banco" value={pay.bank} onChange={e => setPay(p => ({ ...p, bank: e.target.value }))} style={{ flex: 1 }} />
+        </div>
+        <Sel value={pay.accountType} onChange={e => setPay(p => ({ ...p, accountType: e.target.value }))}>
+          {ACCOUNT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </Sel>
+        <Inp placeholder="N° de cuenta" inputMode="numeric" value={pay.accountNumber} onChange={e => setPay(p => ({ ...p, accountNumber: e.target.value }))} />
+        <Inp placeholder="Email (opcional)" type="email" value={pay.email} onChange={e => setPay(p => ({ ...p, email: e.target.value }))} />
+        {payFilled && (
+          <div style={{ marginTop: 4 }}>
+            <Check checked={payConsent} onChange={setPayConsent}>
+              Acepto que estos datos se muestren a quienes tengan el link de esta sala, para que me transfieran. <button onClick={openPrivacy} style={linkBtn}>Política de privacidad</button>
+            </Check>
+          </div>
+        )}
+        {payBlockMsg && <div style={{ fontSize: 12, color: T.warn, fontWeight: 600 }}>{payBlockMsg}</div>}
+      </div>
+    </Card>
+  );
+
+  // ─── Diner: "Transfer $X to …" card + paid toggle ───
+  const payCard = pid => {
+    const pm = roomData?.payment;
+    const isPaid = !!roomData?.paid?.[pid];
+    if (!pm || !claims[pid]) return null;
+    const amount = pTot(pid);
+    const rows = Object.keys(PAY_LABELS).filter(k => pm[k]);
+    return (
+      <Card style={{ borderColor: isPaid ? T.accentBorder : T.border }}>
+        <Lbl>💸 PAGO</Lbl>
+        <div style={{ fontSize: 15, marginBottom: 12 }}>
+          Transfiere <strong style={{ color: T.accent, fontSize: 20, fontFamily: FT }}>{fmt(amount)}</strong> a <strong>{pm.name}</strong>
+        </div>
+        <div style={{ background: T.surface, borderRadius: 12, border: `1px solid ${T.border}`, padding: "4px 14px", marginBottom: 10 }}>
+          {rows.map(k => (
+            <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${T.border}` }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: T.textDim }}>{PAY_LABELS[k]}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, overflowWrap: "anywhere" }}>{pm[k]}</div>
+              </div>
+              {k !== "accountType" && <button onClick={() => cp(pm[k], "pay_" + k)} style={{ ...linkBtn, textDecoration: "none", color: T.accent, fontWeight: 700, fontSize: 12 }}>{copied === "pay_" + k ? "✓ Copiado" : "Copiar"}</button>}
+            </div>
+          ))}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0" }}>
+            <div style={{ flex: 1 }}><div style={{ fontSize: 11, color: T.textDim }}>Monto</div><div style={{ fontSize: 14, fontWeight: 600 }}>{Math.round(amount)}</div></div>
+            <button onClick={() => cp(String(Math.round(amount)), "pay_amount")} style={{ ...linkBtn, textDecoration: "none", color: T.accent, fontWeight: 700, fontSize: 12 }}>{copied === "pay_amount" ? "✓ Copiado" : "Copiar"}</button>
+          </div>
+        </div>
+        <GBtn full onClick={() => cp(payText(pm) + `\nMonto: ${fmt(amount)}`, "pay_all")} style={{ marginBottom: 10 }}>{copied === "pay_all" ? "✅ ¡Copiado!" : "📋 Copiar todos los datos"}</GBtn>
+        {isPaid ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: T.accentSoft, borderRadius: 12, padding: "12px 14px" }}>
+            <span style={{ color: T.accent, fontWeight: 700 }}>✅ Marcado como pagado</span>
+            <button onClick={() => togglePaid(pid)} style={{ ...linkBtn, fontSize: 12 }}>Deshacer</button>
+          </div>
+        ) : (
+          <Btn full onClick={() => togglePaid(pid)}>✅ Ya transferí</Btn>
+        )}
+      </Card>
+    );
+  };
+
+  // ─── Diner: optional phone with explicit consent ───
+  const phoneCard = pid => {
+    void contactTick; // re-render dependency
+    const saved = hasSavedContact(pid);
+    const valid = !!normPhone(phoneInput);
+    return (
+      <Card>
+        <Lbl>📲 ¿TE AVISAMOS POR WHATSAPP? (OPCIONAL)</Lbl>
+        {saved ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <span style={{ fontSize: 14, color: T.accent, fontWeight: 700 }}>✓ Tu número quedó guardado</span>
+            <button onClick={() => deleteMyPhone(pid)} disabled={contactBusy} style={{ ...linkBtn, fontSize: 13, color: T.danger }}>Borrar mi número</button>
+          </div>
+        ) : (<>
+          <div style={{ fontSize: 13, color: T.textSec, marginBottom: 10, lineHeight: 1.5 }}>Déjanos tu número y el organizador podrá avisarte cuánto debes y a quién transferir. Solo lo verá el organizador de esta cuenta.</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <Inp placeholder="+56 9 1234 5678" type="tel" inputMode="tel" autoComplete="tel" value={phoneInput} onChange={e => setPhoneInput(e.target.value)} style={{ flex: 1 }} />
+          </div>
+          {phoneInput && !valid && <div style={{ fontSize: 12, color: T.warn, marginBottom: 8 }}>Ingresa un celular chileno: +56 9 XXXX XXXX</div>}
+          <Check checked={phoneConsent} onChange={setPhoneConsent}>
+            Acepto que el organizador de esta cuenta me contacte por WhatsApp sobre este pago. Puedo borrar mi número cuando quiera. <button onClick={openPrivacy} style={linkBtn}>Política de privacidad</button>
+          </Check>
+          <Btn full disabled={!valid || !phoneConsent || contactBusy} onClick={() => saveMyPhone(pid)} style={{ marginTop: 12 }}>{contactBusy ? "Guardando…" : "Guardar mi número"}</Btn>
+        </>)}
+      </Card>
+    );
+  };
+
   const setIQ = (iid, q) => setMyQtys(prev => { const n = { ...prev }; if (q <= 0) delete n[iid]; else n[iid] = q; return n; });
 
   // Shared items: calculate this person's share based on how many people joined
@@ -675,7 +917,7 @@ export default function SplitPay() {
     setShowOnboarding(false);
   };
 
-  if (showOnboarding) return (
+  if (showOnboarding && view !== "privacy") return (
     <Shell>
       <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh", padding: "0 28px" }}>
         {/* Skip */}
@@ -798,6 +1040,9 @@ export default function SplitPay() {
 
         <div style={{ textAlign: "center", marginTop: 24, paddingBottom: 24 }}>
           <button onClick={() => { setObSlide(0); setShowOnboarding(true); }} style={{ background: "none", border: "none", color: T.textSec, fontSize: 14, cursor: "pointer", textDecoration: "underline" }}>¿Cómo funciona?</button>
+          <div style={{ marginTop: 12 }}>
+            <button onClick={openPrivacy} style={{ ...linkBtn, fontSize: 12, color: T.textDim }}>Política de privacidad</button>
+          </div>
         </div>
       </div>
     </Shell>
@@ -933,8 +1178,10 @@ export default function SplitPay() {
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 24, fontWeight: 800, fontFamily: FT, paddingTop: 12, borderTop: `1px solid ${T.border}` }}><span>Total</span><span style={{ color: T.accent }}>{fmt(sub + tip)}</span></div>
           </Card>
 
-          <Fab disabled={people.length < 2 || ocrItems.length === 0} onClick={createRoom}>
-            {people.length < 2 ? "Agrega al menos 2 personas" : "🚀 Crear Sala y Compartir"}
+          {paymentEditor()}
+
+          <Fab disabled={people.length < 2 || ocrItems.length === 0 || !payValid} onClick={createRoom}>
+            {people.length < 2 ? "Agrega al menos 2 personas" : !payValid ? payBlockMsg : "🚀 Crear Sala y Compartir"}
           </Fab>
         </div>
       </Shell>
@@ -1028,8 +1275,10 @@ export default function SplitPay() {
             <Btn onClick={addPerson} style={{ padding: "12px 20px" }}>+</Btn>
           </div>
 
+          {paymentEditor()}
+
           <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-            <Btn color={T.accent} full onClick={saveRoomEdits} disabled={ocrItems.length === 0 || people.length < 2}>💾 Guardar cambios</Btn>
+            <Btn color={T.accent} full onClick={saveRoomEdits} disabled={ocrItems.length === 0 || people.length < 2 || !payValid}>💾 Guardar cambios</Btn>
             <GBtn onClick={() => { setEditingRoom(false); setEditId(null); setShowAdd(false); }}>Cancelar</GBtn>
           </div>
         </div>
@@ -1226,8 +1475,10 @@ export default function SplitPay() {
             <h2 style={{ fontSize: 24, fontWeight: 800, fontFamily: FT, margin: "0 0 6px" }}>
               {justUpdated ? "Respuesta actualizada ✓" : "¡Registrado!"}
             </h2>
-            <p style={{ color: T.textSec, fontSize: 14 }}>{rem > 0 ? `Faltan ${rem} persona${rem > 1 ? "s" : ""}` : "🎉 ¡Todos confirmaron!"}</p>
+            <p style={{ color: T.textSec, fontSize: 14 }}>{rem > 0 ? `${rem > 1 ? "Faltan" : "Falta"} ${rem} persona${rem > 1 ? "s" : ""}` : "🎉 ¡Todos confirmaron!"}</p>
           </div>
+          {canCorrect && payCard(lastSubmittedPerson)}
+          {canCorrect && phoneCard(lastSubmittedPerson)}
           {canCorrect && (
             <GBtn full onClick={handleCorrect} style={{ color: T.warn, borderColor: T.warn }}>✏️ Corregir mi reclamo</GBtn>
           )}
@@ -1290,6 +1541,61 @@ export default function SplitPay() {
     );
   }
 
+  // ── PRIVACY POLICY (/privacidad) ──
+  if (view === "privacy") {
+    const S = ({ t, children }) => (
+      <div style={{ marginBottom: 20 }}>
+        <h3 style={{ fontSize: 16, fontWeight: 800, fontFamily: FT, margin: "0 0 8px", color: T.text }}>{t}</h3>
+        <div style={{ fontSize: 14, color: T.textSec, lineHeight: 1.65 }}>{children}</div>
+      </div>
+    );
+    const li = { margin: "4px 0 4px 18px" };
+    const goBack = () => {
+      if (window.location.pathname.toLowerCase().startsWith("/privacidad")) window.history.replaceState(null, "", "/");
+      setView(privacyFrom && privacyFrom !== "privacy" ? privacyFrom : "home");
+    };
+    return (
+      <Shell>
+        <Hdr title="Política de privacidad" sub={`Última actualización: ${new Date(PRIVACY_VERSION + "T12:00:00").toLocaleDateString("es-CL", { day: "numeric", month: "long", year: "numeric" })}`} onBack={goBack} />
+        <div style={{ padding: "20px 20px 48px" }}>
+          <S t="1. Quién es responsable">
+            SplitPay es responsable del tratamiento de tus datos personales. Para cualquier consulta o para ejercer tus derechos escríbenos a <strong style={{ color: T.text }}>{PRIVACY_CONTACT}</strong>.
+          </S>
+          <S t="2. Qué datos tratamos y para qué">
+            <ul style={{ padding: 0 }}>
+              <li style={li}><strong style={{ color: T.text }}>Nombres y consumo:</strong> los nombres que ingresa el organizador y lo que cada persona marca, para calcular cuánto paga cada uno.</li>
+              <li style={li}><strong style={{ color: T.text }}>Foto de la boleta:</strong> se envía a un proveedor de inteligencia artificial solo para leer los ítems y precios. SplitPay no guarda la foto.</li>
+              <li style={li}><strong style={{ color: T.text }}>Datos de transferencia del organizador</strong> (nombre, RUT, banco, cuenta, email): solo si el organizador los ingresa y acepta compartirlos. Los ven quienes tengan el link de la sala.</li>
+              <li style={li}><strong style={{ color: T.text }}>Teléfono (opcional):</strong> solo si lo ingresas y aceptas, para que el organizador de esa cuenta te contacte por WhatsApp sobre el pago. Solo lo ve el organizador con su sesión iniciada.</li>
+              <li style={li}><strong style={{ color: T.text }}>Estado de pago:</strong> si marcaste que ya pagaste.</li>
+              <li style={li}><strong style={{ color: T.text }}>Cuenta de Google (opcional):</strong> nombre, correo y foto, para guardar tu historial de salas e identificarte como organizador.</li>
+            </ul>
+            No usamos tus datos para publicidad ni los vendemos.
+          </S>
+          <S t="3. Base del tratamiento">
+            Tratamos el teléfono, los datos de transferencia y la cuenta de Google con tu consentimiento, que puedes retirar cuando quieras. El resto de los datos se usan porque son necesarios para entregarte el servicio que pediste: dividir la cuenta.
+          </S>
+          <S t="4. Con quién se comparten">
+            Usamos proveedores que procesan datos por cuenta de SplitPay: Google Firebase (base de datos e inicio de sesión), Vercel (alojamiento de la app) y Anthropic (lectura de la foto de la boleta). Estos proveedores pueden almacenar datos fuera de Chile. Dentro de la app, cada dato lo ven solo las personas indicadas en el punto 2.
+          </S>
+          <S t="5. Cuánto tiempo los guardamos">
+            Mientras la sala exista o hasta que pidas eliminarlos. Puedes borrar tu teléfono tú mismo desde la sala, en el mismo dispositivo donde lo ingresaste, o pedirnos que lo eliminemos.
+          </S>
+          <S t="6. Tus derechos">
+            Puedes pedir acceso a tus datos, rectificarlos, suprimirlos, oponerte a su tratamiento, solicitar su portabilidad o su bloqueo temporal. Escríbenos a <strong style={{ color: T.text }}>{PRIVACY_CONTACT}</strong> indicando el código de la sala y tu nombre en ella.
+          </S>
+          <S t="7. Seguridad">
+            Los teléfonos se guardan separados del resto de la sala y las reglas de nuestra base de datos solo permiten leerlos al organizador autenticado. Ningún sistema es 100% seguro, pero aplicamos medidas razonables para proteger tus datos.
+          </S>
+          <S t="8. Cambios">
+            Si cambiamos esta política, actualizaremos la fecha de arriba. Cada consentimiento queda registrado con la versión vigente al momento de darlo.
+          </S>
+          <Btn full onClick={goBack}>Volver</Btn>
+        </div>
+      </Shell>
+    );
+  }
+
   // ── PROFILE ──
   if (view === "profile") return (
     <Shell>
@@ -1307,6 +1613,7 @@ export default function SplitPay() {
           </Card>
           <GBtn full onClick={() => setView("history")} style={{ padding: 16 }}>🕘 Ver historial de salas ({roomHistory.length})</GBtn>
           <Btn color={T.danger} full onClick={handleLogout} style={{ borderRadius: 14 }}>Cerrar sesión</Btn>
+          <div style={{ textAlign: "center" }}><button onClick={openPrivacy} style={{ ...linkBtn, fontSize: 12, color: T.textDim }}>Política de privacidad</button></div>
         </>) : (<>
           <Card style={{ textAlign: "center", padding: "32px 20px" }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>👤</div>
@@ -1327,6 +1634,10 @@ export default function SplitPay() {
     const overCl = items.filter(it => claimedQty(it.id) > it.qty);
     const underCl = allDone ? items.filter(it => claimedQty(it.id) < it.qty) : [];
     const sumP = ppl.reduce((s, p) => s + pTot(p.id), 0);
+    const paidMap = roomData?.paid || {};
+    const paidPeople = ppl.filter(p => claims[p.id] && paidMap[p.id]);
+    const collected = paidPeople.reduce((s, p) => s + pTot(p.id), 0);
+    const nContacts = ppl.filter(p => contacts[p.id]?.phone).length;
 
     return (
       <Shell>
@@ -1342,6 +1653,36 @@ export default function SplitPay() {
               <div style={{ fontSize: 13, color: T.textSec }}>{allDone ? "✅ ¡Todos confirmaron!" : "Esperando…"}</div>
             </div>
           </Card>
+
+          {/* Payments summary */}
+          {confCount > 0 && (
+            <Card style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, color: T.textSec }}>💸 Pagado</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FT }}>{paidPeople.length}/{confCount} <span style={{ fontSize: 13, color: T.textSec, fontWeight: 600 }}>confirmados</span></div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 12, color: T.textSec }}>Recaudado</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: FT, color: T.accent }}>{fmt(collected)}</div>
+              </div>
+            </Card>
+          )}
+
+          {/* Organizer access to contacts */}
+          {isOwner ? (
+            <Card style={{ background: T.accentSoft, borderColor: T.accentBorder }}>
+              <div style={{ fontSize: 13, color: T.accent, fontWeight: 700 }}>🔐 Eres el organizador</div>
+              <div style={{ fontSize: 12, color: T.textSec, marginTop: 4, lineHeight: 1.5 }}>{nContacts > 0 ? `${nContacts} persona${nContacts !== 1 ? "s dejaron" : " dejó"} su WhatsApp. Usa "Recordar" para escribirles.` : "Nadie ha dejado su WhatsApp todavía."} Solo tú ves estos números.</div>
+            </Card>
+          ) : isCreatorDevice && (
+            <Card>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>🔒 ¿Quieres recordarle a tu grupo por WhatsApp?</div>
+              <div style={{ fontSize: 12, color: T.textSec, marginBottom: 12, lineHeight: 1.5 }}>Inicia sesión como organizador para ver los números que tu grupo decidió compartir contigo.</div>
+              {user
+                ? <div style={{ fontSize: 12, color: roomData?.ownerUid ? T.warn : T.textSec }}>{roomData?.ownerUid ? "Esta sala ya tiene otro organizador." : "Activando acceso de organizador…"}</div>
+                : <GBtn full onClick={handleLogin} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}><GoogleG /> Continuar con Google</GBtn>}
+            </Card>
+          )}
 
           {/* Share reminder */}
           {!allDone && roomCode && (
@@ -1377,9 +1718,16 @@ export default function SplitPay() {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div>
                     <div style={{ fontSize: 12, color: T.textSec }}>{cl ? `${pc.toFixed(0)}% del total` : "⏳ Pendiente"}</div>
+                    {cl && <div style={{ marginTop: 4 }}>{paidMap[p.id] ? <Tag color={T.accent}>💸 Pagó</Tag> : <Tag color={T.warn}>Por pagar</Tag>}</div>}
                   </div>
                   {cl ? <div style={{ fontSize: 20, fontWeight: 800, color: T.accent }}>{fmt(tot)}</div> : <Tag color={T.warn}>Esperando</Tag>}
                 </div>
+                {isOwner && contacts[p.id]?.phone && !(cl && paidMap[p.id]) && (
+                  <a href={waLink(contacts[p.id].phone, reminderText(p))} target="_blank" rel="noopener noreferrer"
+                    style={{ display: "block", textAlign: "center", textDecoration: "none", background: T.whatsapp, color: "#000", borderRadius: 12, padding: "10px 14px", fontSize: 13, fontWeight: 700, margin: cl ? "0 0 10px" : "10px 0 0" }}>
+                    💬 Recordar a {p.name} · {fmtPhone(contacts[p.id].phone)}
+                  </a>
+                )}
                 {cl && (<>
                   <div style={{ background: T.surface, borderRadius: 6, height: 4, overflow: "hidden", marginBottom: 10 }}>
                     <div style={{ background: T.accent, height: "100%", width: `${pc}%`, borderRadius: 6, transition: "width .5s" }} />
@@ -1396,7 +1744,10 @@ export default function SplitPay() {
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: T.textSec, padding: "4px 0 0", borderTop: `1px solid ${T.border}`, marginTop: 4 }}>
                     <span>Propina ({tp}%)</span><span>{fmt(t)}</span>
                   </div>
-                  <GBtn full onClick={() => editClaim(p.id)} style={{ marginTop: 10, padding: "9px 14px", fontSize: 13 }}>✏️ Editar selección de {p.name}</GBtn>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <GBtn full onClick={() => editClaim(p.id)} style={{ padding: "9px 10px", fontSize: 13 }}>✏️ Editar</GBtn>
+                    <GBtn full onClick={() => togglePaid(p.id)} style={{ padding: "9px 10px", fontSize: 13, color: paidMap[p.id] ? T.textSec : T.accent, borderColor: paidMap[p.id] ? T.border : T.accentBorder }}>{paidMap[p.id] ? "↩︎ Desmarcar pago" : "💸 Marcar pagado"}</GBtn>
+                  </div>
                 </>)}
               </Card>
             );

@@ -35,11 +35,15 @@ splitpay/
 │   ├── main.jsx          # React entry point
 │   ├── App.jsx           # Entire app (single file, ~1020 lines)
 │   ├── firebase.js       # Firebase init and config
-│   └── db.js             # Firebase helpers: createRoom, getRoom, submitClaim, deleteClaim, subscribeToClaims
+│   └── db.js             # Firebase helpers (rooms, claims, paid, contacts, owner, user history)
+├── tests/
+│   └── database.rules.test.mjs  # Security-rules tests (Firebase emulator)
 ├── public/
 │   └── manifest.json     # PWA manifest
 ├── index.html            # HTML shell, Google Fonts, dark bg (#06080c)
 ├── vite.config.js        # Vite config (React plugin, dist output)
+├── database.rules.json   # Firebase Realtime Database security rules (source of truth)
+├── firebase.json         # Firebase CLI config (rules deploy + emulator)
 ├── vercel.json           # SPA rewrite rules, /api/ocr route, 30s timeout
 ├── package.json          # Scripts and dependencies
 └── README.md             # Setup + deployment instructions (Spanish)
@@ -64,6 +68,7 @@ The entire frontend lives in `src/App.jsx`. It renders one of 8 views based on a
 | `"dashboard"` | Real-time breakdown per person, full receipt, export summary |
 | `"history"` | List of rooms the signed-in user created/joined (`users/{uid}/rooms`) |
 | `"profile"` | Signed-in user's profile / logout |
+| `"privacy"` | Privacy policy (also reachable at `/privacidad`; bypasses onboarding) |
 Two "screens" are **not** `view` values and short-circuit rendering before it:
 - `showOnboarding` — 4-slide tutorial (persisted via `localStorage` key `sp_onboarded`).
 - `!urlChecked` — "Cargando..." while the `/sala/CODE` URL is being resolved.
@@ -83,6 +88,9 @@ Navigation happens via `setView("...")` calls — no React Router. The one excep
 - The dashboard has a "Boleta completa" section: every item with claimed/total, who took it, and shared-item splits.
 - **Optional Google login** (`auth.js`, `authChip`, `matchPersonId`): a signed-in user is auto-matched to a person by name when that person has no claim yet; rooms are saved to `users/{uid}/rooms` for the history view. Login is never required to use a room.
 - **Room editing after creation**: `loadRoomForEditing` / `saveRoomEdits` (`updateRoom`) reuse the `setup` state to change items, people and tip of an existing room.
+- **Payments**: organizer may add transfer data (`payment`) in setup / edit room, only with an explicit consent checkbox. Diners see `payCard` ("Transfiere $X a …", copy buttons) on `formDone` and mark "Ya transferí" (`rooms/{code}/paid/{pid}`, subscribed in real time). Anyone can toggle paid from the dashboard.
+- **Phones (personal data)**: optional, collected on `formDone` via `phoneCard` with an explicit consent checkbox; stored in `contacts/{code}/{pid}` (never under `rooms/`). The device that saved it can delete it (`sp_contact_{code}_{pid}` in localStorage).
+- **Ownership**: `rooms/{code}/ownerUid` is set at creation if the organizer is signed in, or later on the creator device (`sp_owner_{code}` in localStorage) after Google login. Only the owner can read `contacts/{code}`; the dashboard then shows "Recordar" `wa.me` links (`reminderText`).
 - No identity/auth for claims: anyone with the link can edit anyone's claim (accepted trade-off). Concurrent edits are last-write-wins.
 
 ### Inline UI Component System
@@ -129,6 +137,18 @@ All data lives under `rooms/{code}`:
     }
   }
 }
+```
+
+Additional fields/paths:
+
+```js
+rooms/{code}: {
+  ownerUid: "googleUid",            // optional; set once (rules forbid changing/removing it)
+  payment: { name, rut, bank, accountType, accountNumber, email, consentAt, consentVersion }, // optional, public to room
+  paid: { "personId": { at: 1704067200000 } }
+}
+contacts/{code}/{personId}: { phone: "+569XXXXXXXX", consentAt, consentVersion }  // owner-only read
+users/{uid}/rooms/{code}: { code, restaurant, branch, total, createdAt, accessedAt } // self-only
 ```
 
 Database helpers live in `src/db.js`. Firebase is initialized in `src/firebase.js` with the project config hardcoded (public Firebase config keys are safe to commit).
@@ -215,9 +235,21 @@ npx vercel dev
 - Shared items are split equally among all claimants for that item.
 - `remaining qty = item.qty - sum(all claims for that item)`.
 
-### No Testing Framework
+### Personal Data & Privacy (Ley 21.719, Chile)
 
-There are currently no automated tests. When adding tests, prefer **Vitest** (Vite-native) with React Testing Library.
+- **Never store personal data (phones, emails, RUTs of diners…) under `rooms/`** — everything there is readable by anyone with the room code. Use a separate path with restrictive rules, like `contacts/`.
+- Every new personal-data field needs: an explicit, unchecked-by-default consent checkbox linking to the privacy policy, `consentAt` + `consentVersion` stored with the data, a way to delete it, and an update to the privacy view.
+- When the privacy text changes, bump `PRIVACY_VERSION` in `App.jsx`. Contact for data requests: `PRIVACY_CONTACT`.
+- Never write `undefined` into Firebase (`set` rejects it): delete the key instead.
+
+### Security Rules
+
+- `database.rules.json` is the source of truth; it must be **published** to Firebase (console → Realtime Database → Rules, or `npx firebase deploy --only database`). Publish rules **before** deploying code that depends on them.
+- Run `tests/database.rules.test.mjs` (instructions in the file) after any rules change.
+
+### Testing
+
+No unit-test framework yet (prefer **Vitest** + React Testing Library when adding one). Security rules have emulator tests in `tests/`.
 
 ---
 
@@ -239,6 +271,6 @@ There are currently no automated tests. When adding tests, prefer **Vitest** (Vi
 - **Firebase config keys are intentional** in `src/firebase.js` — Firebase public config is not a secret.
 - **The OCR function is Chilean-receipt-specific.** The Claude prompt targets boletas/facturas; adjust the prompt if expanding to other regions.
 - **`vercel.json` rewrites** ensure all non-API paths serve `index.html`. Don't break this when adding new API routes.
-- **Security depends on Firebase Realtime Database rules**, which are not in this repo (configured in the Firebase console). The client config is public by design; room codes are the only access control.
+- **Security depends on Firebase Realtime Database rules** (`database.rules.json`). The client config is public by design; room codes are the only access control for `rooms/`.
 - **OCR progress bar is fake** (fixed jumps in `processOCR`), not real progress.
 - **`tipPercent` is stored as a number (e.g., `10` for 10%)**, not a decimal.

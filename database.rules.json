@@ -1,0 +1,34 @@
+{
+  "rules": {
+    "rooms": {
+      "$code": {
+        ".read": true,
+        ".write": "newData.exists() && (newData.child('ownerUid').val() === data.child('ownerUid').val() || (!data.child('ownerUid').exists() && auth != null && newData.child('ownerUid').val() === auth.uid))",
+        "paid": {
+          "$pid": {
+            ".validate": "newData.hasChild('at') && newData.child('at').isNumber()"
+          }
+        }
+      }
+    },
+    "contacts": {
+      "$code": {
+        ".read": "auth != null && root.child('rooms').child($code).child('ownerUid').val() === auth.uid",
+        "$pid": {
+          ".write": "root.child('rooms').child($code).exists()",
+          ".validate": "newData.hasChildren(['phone', 'consentAt', 'consentVersion']) && newData.child('phone').isString() && newData.child('phone').val().matches(/^\\+569[0-9]{8}$/) && newData.child('consentAt').isNumber() && newData.child('consentVersion').isString()",
+          "phone": { ".validate": true },
+          "consentAt": { ".validate": true },
+          "consentVersion": { ".validate": true },
+          "$other": { ".validate": false }
+        }
+      }
+    },
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}
