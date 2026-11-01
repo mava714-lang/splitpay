@@ -244,7 +244,7 @@ npx vercel dev
 
 ### Security Rules
 
-- `database.rules.json` is the source of truth; it must be **published** to Firebase (console → Realtime Database → Rules, or `npx firebase deploy --only database`). Publish rules **before** deploying code that depends on them.
+- `database.rules.json` is the source of truth. It is **published automatically** by `.github/workflows/firebase-rules.yml` on push to `main` (tests in the emulator → prints current rules as backup → publishes via `scripts/firebase-rules.mjs`). Requires the GitHub secret `FIREBASE_SERVICE_ACCOUNT` (service account JSON with the "Firebase Realtime Database Admin" role). The workflow can also be run manually with `mode: show` to inspect the published rules.
 - Run `tests/database.rules.test.mjs` (instructions in the file) after any rules change.
 
 ### Testing
